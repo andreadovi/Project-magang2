@@ -384,7 +384,13 @@ with tab3:
                     )
                     st.caption("🔵 Biru = Cleaning   🟡 Kuning = Resting (di gudang, mixer bebas dipakai)")
 
-                    excel_data = pivot_to_excel(pivot_df, meta, st.session_state.master_mixer)
+
+                    excel_data = pivot_to_excel(
+                        pivot_df, meta,
+                        st.session_state.master_mixer,
+                        filling_plan=st.session_state.filling_plan,
+                        master_produk=st.session_state.master_produk
+                    )
                     st.download_button(
                         "📥 Download Excel",
                         excel_data,
