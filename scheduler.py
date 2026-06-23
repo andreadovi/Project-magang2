@@ -4,6 +4,8 @@ import math
 
 SHIFTS_PER_DAY    = 3
 BATCHES_PER_SHIFT = 2  # default fallback
+MIN_LEAD_SHIFTS   = 2  # mixing harus selesai minimal 2 shift sebelum filling
+MAX_SHELF_DAYS    = 6  # produk kadaluarsa hari ke-7, jadi max simpan 6 hari
 
 
 def shift_index(date_str, shift):
@@ -25,32 +27,46 @@ def same_week(date_str1, date_str2):
     return d1.isocalendar()[1] == d2.isocalendar()[1] and d1.year == d2.year
 
 
-def get_deadline_idx(fill_date, fill_shift, resting_days):
-    """Latest allowed mixing shift index before filling."""
+def get_deadline_idx(fill_date, fill_shift, resting_days,
+                     min_lead_shifts=MIN_LEAD_SHIFTS):
+    """
+    Latest allowed mixing shift index before filling.
+    Formula: filling_idx - resting_days_in_shifts - min_lead_shifts
+    Resting days dikonversi ke shifts (1 hari = 3 shifts).
+    """
+    fill_idx = shift_index(fill_date, fill_shift)
     if resting_days == 0:
-        return shift_index(fill_date, fill_shift) - 1
+        return fill_idx - min_lead_shifts
     else:
-        fill_dt  = datetime.strptime(str(fill_date), "%Y-%m-%d")
-        mix_date = fill_dt - timedelta(days=resting_days)
-        return shift_index(mix_date.strftime("%Y-%m-%d"), SHIFTS_PER_DAY)
+        # Mixing harus selesai min_lead_shifts sebelum resting dimulai
+        # Resting dimulai sejak mixing selesai, berakhir di filling
+        # Jadi: deadline = fill_idx - resting_days*3 - min_lead_shifts
+        return fill_idx - (resting_days * SHIFTS_PER_DAY) - min_lead_shifts
 
 
-def try_schedule_on_mixer(mixer_name, mixer_schedule, deadline_idx,
+def get_earliest_idx(fill_date, fill_shift, max_shelf_days=MAX_SHELF_DAYS):
+    """
+    Earliest allowed mixing shift index — produk tidak boleh lebih dari
+    max_shelf_days sebelum filling (kadaluarsa hari ke-7).
+    """
+    fill_idx = shift_index(fill_date, fill_shift)
+    return fill_idx - (max_shelf_days * SHIFTS_PER_DAY)
+
+
+def try_schedule_on_mixer(mixer_name, mixer_schedule, deadline_idx, earliest_idx,
                            target_kg, cap, batch_per_shift, grup_produk):
     """
-    Try to schedule all target_kg on a SINGLE mixer using CONTIGUOUS slots
-    going backwards from deadline_idx.
-
-    FIX: Removed incorrect global reset on grup conflict. Grup conflict now
-    only shifts the search window backward by 1 — does not wipe accumulated
-    assignments. Fully-used or cleaning slots also reset the window correctly.
+    Try to schedule all target_kg on a SINGLE mixer using CONTIGUOUS slots,
+    going backwards from deadline_idx (just-in-time).
+    Tidak boleh lebih awal dari earliest_idx (batas kadaluarsa).
     """
     remaining_kg = target_kg
     search_idx   = deadline_idx
     assignments  = []
 
     while remaining_kg > 0:
-        if search_idx < 0:
+        # Batas kiri: tidak boleh melampaui earliest_idx (kadaluarsa)
+        if search_idx < 0 or search_idx < earliest_idx:
             return None
 
         state = mixer_schedule[mixer_name].get(search_idx, {
@@ -58,7 +74,7 @@ def try_schedule_on_mixer(mixer_name, mixer_schedule, deadline_idx,
             "cleaning": False, "items": []
         })
 
-        # Hard block: cleaning shift — reset window and move past it
+        # Hard block: cleaning shift
         if state.get("cleaning", False):
             assignments  = []
             remaining_kg = target_kg
@@ -67,14 +83,14 @@ def try_schedule_on_mixer(mixer_name, mixer_schedule, deadline_idx,
 
         avail = batch_per_shift - state.get("batches_used", 0)
 
-        # Hard block: fully used — reset window and move past it
+        # Hard block: fully used
         if avail <= 0:
             assignments  = []
             remaining_kg = target_kg
             search_idx  -= 1
             continue
 
-        # Grup conflict: look at last COMMITTED non-cleaning slot before this one
+        # Grup conflict: look at last committed non-cleaning slot
         used_before = sorted(
             [s for s in mixer_schedule[mixer_name]
              if s < search_idx
@@ -85,13 +101,12 @@ def try_schedule_on_mixer(mixer_name, mixer_schedule, deadline_idx,
         last_grup = mixer_schedule[mixer_name][used_before[0]]["grup"] if used_before else None
 
         if last_grup is not None and last_grup != grup_produk:
-            # Grup conflict: slide window back, do not reset assignments
             assignments  = []
             remaining_kg = target_kg
             search_idx  -= 1
             continue
 
-        # Slot is usable
+        # Slot usable
         use_kg      = min(avail * cap, remaining_kg)
         use_batches = math.ceil(use_kg / cap)
         actual_kg   = use_batches * cap
@@ -113,11 +128,10 @@ def try_schedule_on_mixer(mixer_name, mixer_schedule, deadline_idx,
     return assignments if remaining_kg <= 0 else None
 
 
-def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_range=None):
-    """
-    FIX: Added date_range parameter so scheduler respects the mixing window
-    selected by the user in the UI.
-    """
+def generate_mixing_schedule(master_mixer, master_produk, filling_plan,
+                              date_range=None,
+                              min_lead_shifts=MIN_LEAD_SHIFTS,
+                              max_shelf_days=MAX_SHELF_DAYS):
     warnings      = []
     shifted       = []
     unscheduled   = []
@@ -160,7 +174,6 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
 
     def mark_cleaning(mixer_name, sidx):
         state = get_shift_state(mixer_name, sidx)
-        # FIX: Only mark if not already marked — prevents duplicate cleaning rows
         if state.get("cleaning", False):
             return False
         state["cleaning"]     = True
@@ -181,14 +194,14 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
         })
         mixer_last_grup[mixer_name] = grup
 
-    # ── Compute earliest/latest allowed mixing index from date_range ─
-    earliest_mix_idx = None
-    latest_mix_idx   = None
+    # ── Batas index dari date_range ───────────────────────────
+    range_earliest_idx = None
+    range_latest_idx   = None
     if date_range:
-        earliest_mix_idx = shift_index(date_range[0], 1)
-        latest_mix_idx   = shift_index(date_range[-1], SHIFTS_PER_DAY)
+        range_earliest_idx = shift_index(date_range[0], 1)
+        range_latest_idx   = shift_index(date_range[-1], SHIFTS_PER_DAY)
 
-    # ── Merge MC liquid info into plan ───────────────────────
+    # ── Merge MC liquid info ──────────────────────────────────
     if "Kode_MC_Liquid" in produk_df.columns:
         plan_df = plan_df.merge(
             produk_df[["Kode_Produk", "Kode_MC_Liquid"]].assign(
@@ -205,9 +218,12 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
     else:
         plan_df["Kode_MC_Liquid"] = plan_df["Kode_Produk"].astype(str)
 
-    # ── Group by MC liquid + filling slot ────────────────────
-    group_cols = ["Kode_MC_Liquid", "Tanggal_Filling", "Shift_Filling", "Urgent"]
+    # ── Group by MC liquid + filling slot ─────────────────────
+    # Boleh digabung antar shift filling yang sama MC liquid-nya
+    # tapi tetap dipisah per Urgent flag
+    group_cols   = ["Kode_MC_Liquid", "Tanggal_Filling", "Shift_Filling", "Urgent"]
     grouped_rows = []
+
     for group_key, grp in plan_df.groupby(group_cols, sort=False):
         mc_liquid, fill_date, fill_shift, urgent = group_key
         total_cs  = grp["Target_CS"].astype(float).sum()
@@ -237,14 +253,61 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
 
     plan_grouped = pd.DataFrame(grouped_rows)
 
-    plan_grouped["_sidx"] = plan_grouped.apply(
-        lambda r: shift_index(r["Tanggal_Filling"], r["Shift_Filling"]), axis=1)
-    plan_grouped["_urgent_sort"] = plan_grouped["Urgent"].apply(
-        lambda x: 0 if x == "Urgent" else 1)
-    plan_grouped = plan_grouped.sort_values(["_urgent_sort", "_sidx"]).reset_index(drop=True)
+    # ── Merge job yang boleh digabung ─────────────────────────
+    # Produk dengan MC liquid sama + urgent sama boleh digabung
+    # mixing-nya meski filling-nya di shift berbeda.
+    # Aturan: ambil filling shift TERKECIL (paling awal) sebagai acuan deadline,
+    # karena mixing harus siap sebelum shift filling pertama.
+    merge_cols   = ["Kode_MC_Liquid", "Urgent"]
+    merged_jobs  = []
+    for merge_key, grp in plan_grouped.groupby(merge_cols, sort=False):
+        mc_liquid, urgent = merge_key
 
-    # ── Schedule each item ────────────────────────────────────
-    for _, item in plan_grouped.iterrows():
+        # Kumpulkan semua filling slots untuk MC liquid ini
+        fill_slots = list(zip(grp["Tanggal_Filling"], grp["Shift_Filling"]))
+        total_cs   = grp["Target_CS"].sum()
+
+        # Deadline = filling slot paling awal (produk harus ready sebelum shift pertama)
+        earliest_fill = grp.apply(
+            lambda r: shift_index(r["Tanggal_Filling"], r["Shift_Filling"]), axis=1
+        ).min()
+        earliest_fill_date  = grp.loc[
+            grp.apply(lambda r: shift_index(r["Tanggal_Filling"], r["Shift_Filling"]), axis=1).idxmin(),
+            "Tanggal_Filling"
+        ]
+        earliest_fill_shift = grp.loc[
+            grp.apply(lambda r: shift_index(r["Tanggal_Filling"], r["Shift_Filling"]), axis=1).idxmin(),
+            "Shift_Filling"
+        ]
+
+        # Ambil atribut dari baris pertama
+        first_row  = grp.iloc[0]
+        kode       = first_row["Kode_Produk"]
+        all_mixers = first_row["Mixer_Kompatibel_All"]
+
+        merged_jobs.append({
+            "Kode_Produk":          kode,
+            "Kode_MC_Liquid":       mc_liquid,
+            "Nama_Produk":          mc_liquid,
+            "Target_CS":            total_cs,
+            "Tanggal_Filling":      earliest_fill_date,
+            "Shift_Filling":        earliest_fill_shift,
+            "Urgent":               urgent,
+            "Mixer_Kompatibel_All": all_mixers,
+            "Fill_Slots":           fill_slots
+        })
+
+    plan_merged = pd.DataFrame(merged_jobs)
+
+    # ── Sort: urgent first, lalu deadline paling awal ─────────
+    plan_merged["_sidx"] = plan_merged.apply(
+        lambda r: shift_index(r["Tanggal_Filling"], r["Shift_Filling"]), axis=1)
+    plan_merged["_urgent_sort"] = plan_merged["Urgent"].apply(
+        lambda x: 0 if x == "Urgent" else 1)
+    plan_merged = plan_merged.sort_values(["_urgent_sort", "_sidx"]).reset_index(drop=True)
+
+    # ── Schedule each job ─────────────────────────────────────
+    for _, item in plan_merged.iterrows():
         kode       = item["Kode_Produk"]
         mc_liquid  = item["Kode_MC_Liquid"]
         nama       = mc_liquid
@@ -255,7 +318,8 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
 
         prod_row = produk_df[produk_df["Kode_Produk"].astype(str).str.strip() == str(kode).strip()]
         if prod_row.empty:
-            unscheduled.append(f"MC Liquid {mc_liquid} (Produk {kode}) tidak ditemukan di Master Produk.")
+            unscheduled.append(
+                f"MC Liquid {mc_liquid} (Produk {kode}) tidak ditemukan di Master Produk.")
             continue
 
         kg_per_cs     = float(prod_row["Kg_per_CS"].values[0])
@@ -268,7 +332,7 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
         else:
             mixer_compat = prod_row["Mixer_List"].values[0]
 
-        # FIX: Round up to nearest capacity of smallest compatible mixer
+        # Pembulatan ke kapasitas mixer terkecil yang kompatibel
         min_cap = min(
             (get_mixer_capacity(m) for m in mixer_compat if m in mixer_schedule),
             default=500
@@ -279,6 +343,31 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
         if target_kg == 0:
             target_kg = min_cap
 
+        # ── Deadline & earliest window per job ────────────────
+        # Deadline: mixing harus selesai min_lead_shifts sebelum filling
+        # (sudah memperhitungkan resting days)
+        job_deadline = get_deadline_idx(fill_date, fill_shift,
+                                        resting_days, min_lead_shifts)
+
+        # Earliest: tidak boleh mixing lebih dari max_shelf_days sebelum filling
+        job_earliest = get_earliest_idx(fill_date, fill_shift, max_shelf_days)
+
+        # Klem ke date_range jika ada
+        if range_earliest_idx is not None:
+            job_earliest = max(job_earliest, range_earliest_idx)
+        if range_latest_idx is not None:
+            job_deadline = min(job_deadline, range_latest_idx)
+
+        # Validasi window
+        if job_deadline < job_earliest:
+            unscheduled.append(
+                f"{kode} - {mc_liquid}: Window mixing tidak valid "
+                f"(deadline lebih awal dari earliest). "
+                f"Cek resting_days atau perluas date_range."
+            )
+            continue
+
+        # Candidate filling slots untuk shifting (non-urgent)
         candidate_slots = [(fill_date, fill_shift)]
         if not is_urgent:
             d = datetime.strptime(fill_date, "%Y-%m-%d")
@@ -294,13 +383,17 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
         scheduled = False
 
         for try_fill_date, try_fill_shift in candidate_slots:
-            try_deadline = get_deadline_idx(try_fill_date, try_fill_shift, resting_days)
+            try_deadline = get_deadline_idx(try_fill_date, try_fill_shift,
+                                            resting_days, min_lead_shifts)
+            try_earliest = get_earliest_idx(try_fill_date, try_fill_shift, max_shelf_days)
 
-            # FIX: Clamp deadline to user-selected date_range
-            if earliest_mix_idx is not None:
-                if try_deadline < earliest_mix_idx:
-                    continue
-                try_deadline = min(try_deadline, latest_mix_idx)
+            if range_earliest_idx is not None:
+                try_earliest = max(try_earliest, range_earliest_idx)
+            if range_latest_idx is not None:
+                try_deadline = min(try_deadline, range_latest_idx)
+
+            if try_deadline < try_earliest:
+                continue
 
             best_assignments = None
             chosen_mixer     = None
@@ -314,29 +407,33 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
                     continue
 
                 assignments = try_schedule_on_mixer(
-                    mixer_name, mixer_schedule, try_deadline,
+                    mixer_name, mixer_schedule,
+                    try_deadline, try_earliest,
                     target_kg, cap, batch_per_shift, grup_produk
                 )
 
                 if assignments is not None:
-                    if best_assignments is None or len(assignments) < len(best_assignments):
+                    # Pilih mixer dengan shift paling sedikit (least busy)
+                    # dan paling dekat ke deadline (just-in-time)
+                    if best_assignments is None or \
+                       len(assignments) < len(best_assignments) or \
+                       (len(assignments) == len(best_assignments) and
+                            assignments[-1]["shift_idx"] > best_assignments[-1]["shift_idx"]):
                         best_assignments = assignments
                         chosen_mixer     = mixer_name
 
             if best_assignments is None:
                 continue
 
-            # ── Commit assignments ────────────────────────────
+            # ── Commit ───────────────────────────────────────
             for a in best_assignments:
                 mixer_name = chosen_mixer
                 sidx       = a["shift_idx"]
 
-                # FIX: Use global mixer_last_grup for cleaning check (not local lookup)
                 current_last_grup = mixer_last_grup[mixer_name]
                 if current_last_grup is not None and current_last_grup != grup_produk:
                     clean_idx    = sidx - 1
                     newly_marked = mark_cleaning(mixer_name, clean_idx)
-                    # FIX: Only append cleaning row if not already marked
                     if newly_marked:
                         cd, cs_shift = index_to_shift(clean_idx)
                         schedule_rows.append({
@@ -389,12 +486,14 @@ def generate_mixing_schedule(master_mixer, master_produk, filling_plan, date_ran
             unscheduled.append(
                 f"{kode} - {nama}: Tidak bisa dijadwalkan "
                 f"(target {target_cs} CS / {target_kg} kg, "
-                f"filling {fill_date} Shift {fill_shift})"
+                f"filling {fill_date} Shift {fill_shift}, "
+                f"window mixing {max_shelf_days} hari)"
             )
 
     if schedule_rows:
         schedule_df = pd.DataFrame(schedule_rows)
-        schedule_df = schedule_df.sort_values(["Tanggal", "Shift", "Mixer"]).reset_index(drop=True)
+        schedule_df = schedule_df.sort_values(
+            ["Tanggal", "Shift", "Mixer"]).reset_index(drop=True)
         schedule_df = schedule_df[[
             "Tanggal", "Shift", "Mixer", "Produk", "Kode_Produk",
             "Batches", "Kapasitas_Mixer", "Total_CS", "Total_kg",
