@@ -59,7 +59,7 @@ with tab1:
 
     with col2:
         st.subheader("📦 Master Produk")
-        st.caption("**Resting_Days**: `2` = perlu didiamkan 2 hari, `0` = tidak. **Mixer_Kompatibel**: pisah koma.")
+        st.caption("**Resting_Days**: `2` = perlu didiamkan 2 hari di gudang, `0` = tidak. **Mixer_Kompatibel**: pisah koma.")
         tmpl_produk = pd.DataFrame({
             "Kode_Produk":      ["P001", "P002", "P003"],
             "Nama_Produk":      ["Produk Alpha", "Produk Beta", "Produk Gamma"],
@@ -274,7 +274,6 @@ with tab3:
         st.subheader("📆 Range Jadwal Mixing")
 
         filling_plan_df = st.session_state.filling_plan
-        # FIX: Use global min across ALL filling dates, not just first item
         all_fill_dates  = pd.to_datetime(filling_plan_df["Tanggal_Filling"])
         global_min_fill = all_fill_dates.min()
         days_to_friday  = (global_min_fill.weekday() - 4) % 7
@@ -297,17 +296,35 @@ with tab3:
             f"{mix_end.strftime('%d %b %Y')}** ({len(date_range)} hari)"
         )
 
+        # ── Parameter just-in-time ────────────────────────────
+        st.subheader("⚙️ Parameter Mixing")
+        c3, c4 = st.columns(2)
+        with c3:
+            min_lead = st.number_input(
+                "Minimal shift sebelum filling (lead time)",
+                min_value=1, max_value=6, value=2,
+                help="Mixing harus selesai minimal N shift sebelum filling dimulai. "
+                     "1 shift ≈ 8 jam."
+            )
+        with c4:
+            max_shelf = st.number_input(
+                "Maksimal hari simpan produk",
+                min_value=1, max_value=7, value=6,
+                help="Produk tidak boleh di-mixing lebih dari N hari sebelum filling "
+                     "(kadaluarsa hari ke-7). Resting days di gudang, bukan di mixer."
+            )
+
         if st.button("⚡ Generate Jadwal Mixing", type="primary", use_container_width=True):
             with st.spinner("Menjadwalkan mixing..."):
-                # FIX: Pass date_range so scheduler respects user-selected window
                 result = generate_mixing_schedule(
                     st.session_state.master_mixer,
                     st.session_state.master_produk,
                     st.session_state.filling_plan,
-                    date_range=date_range
+                    date_range=date_range,
+                    min_lead_shifts=int(min_lead),
+                    max_shelf_days=int(max_shelf)
                 )
             st.session_state.schedule_result     = result
-            # FIX: Store date_range so pivot uses same range after re-render
             st.session_state.schedule_date_range = date_range
 
         if "schedule_result" in st.session_state:
@@ -336,7 +353,6 @@ with tab3:
             if not schedule_df.empty:
                 st.subheader("📅 Jadwal Mixing")
 
-                # FIX: Use stored date_range from last generate run
                 pivot_date_range = st.session_state.get("schedule_date_range", date_range)
                 pivot_df, meta   = build_pivot(
                     schedule_df,
@@ -346,8 +362,6 @@ with tab3:
                 )
 
                 if not pivot_df.empty:
-                    # FIX: No rename_map needed — col_labels now use spaces, no newline
-                    # style_pivot references meta["col_labels"] which match pivot_df.columns exactly
                     def style_pivot(row):
                         styles = [""] * len(row)
                         mixer  = row.get("Mixer", "")
@@ -368,7 +382,7 @@ with tab3:
                         pivot_df.style.apply(style_pivot, axis=1),
                         use_container_width=True, hide_index=True
                     )
-                    st.caption("🔵 Biru = Cleaning   🟡 Kuning = Resting")
+                    st.caption("🔵 Biru = Cleaning   🟡 Kuning = Resting (di gudang, mixer bebas dipakai)")
 
                     excel_data = pivot_to_excel(pivot_df, meta, st.session_state.master_mixer)
                     st.download_button(
