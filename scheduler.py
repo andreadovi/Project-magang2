@@ -18,42 +18,157 @@ def kg_needed(target_cs, kg_per_cs):
         return 0.0
 
 
+def normalize_columns(df):
+    """Normalisasi nama kolom: strip spasi, replace spasi dengan _, title→snake case."""
+    df = df.copy()
+    df.columns = (
+        df.columns
+        .str.strip()
+        .str.replace(r"\s+", "_", regex=True)
+        .str.replace(r"[^\w]", "", regex=True)
+    )
+    return df
+
+
+FILLING_COL_MAP = {
+    # Variasi nama kolom yang mungkin ada di file Excel
+    "kode_produk":     "Kode_Produk",
+    "kodeproduk":      "Kode_Produk",
+    "kode":            "Kode_Produk",
+    "product_code":    "Kode_Produk",
+    "target_cs":       "Target_CS",
+    "targetcs":        "Target_CS",
+    "target":          "Target_CS",
+    "qty":             "Target_CS",
+    "quantity":        "Target_CS",
+    "jumlah_cs":       "Target_CS",
+    "tanggal_filling": "Tanggal_Filling",
+    "tanggalfilling":  "Tanggal_Filling",
+    "tgl_filling":     "Tanggal_Filling",
+    "tanggal":         "Tanggal_Filling",
+    "filling_date":    "Tanggal_Filling",
+    "shift_filling":   "Shift_Filling",
+    "shiftfilling":    "Shift_Filling",
+    "shift":           "Shift_Filling",
+    "urgent":          "Urgent",
+    "prioritas":       "Urgent",
+    "priority":        "Urgent",
+}
+
+MIXER_COL_MAP = {
+    "mixer":           "Mixer",
+    "nama_mixer":      "Mixer",
+    "kapasitas_kg":    "Kapasitas_kg",
+    "kapasitas":       "Kapasitas_kg",
+    "capacity_kg":     "Kapasitas_kg",
+    "batch_per_shift": "Batch_per_Shift",
+    "batch":           "Batch_per_Shift",
+    "grup_cleaning":   "Grup_Cleaning",
+    "grup":            "Grup_Cleaning",
+    "group":           "Grup_Cleaning",
+}
+
+PRODUK_COL_MAP = {
+    "kode_produk":      "Kode_Produk",
+    "kodeproduk":       "Kode_Produk",
+    "kode":             "Kode_Produk",
+    "nama_produk":      "Nama_Produk",
+    "namaproduk":       "Nama_Produk",
+    "nama":             "Nama_Produk",
+    "kode_mc_liquid":   "Kode_MC_Liquid",
+    "kode_mc":          "Kode_MC_Liquid",
+    "mc_liquid":        "Kode_MC_Liquid",
+    "kg_per_cs":        "Kg_per_CS",
+    "kgpercs":          "Kg_per_CS",
+    "kg_cs":            "Kg_per_CS",
+    "resting_days":     "Resting_Days",
+    "restingdays":      "Resting_Days",
+    "resting":          "Resting_Days",
+    "grup_cleaning":    "Grup_Cleaning",
+    "grup":             "Grup_Cleaning",
+    "mixer_kompatibel": "Mixer_Kompatibel",
+    "mixer_compatible": "Mixer_Kompatibel",
+    "mixer":            "Mixer_Kompatibel",
+}
+
+
+def apply_col_map(df, col_map):
+    """Rename kolom berdasarkan mapping (case-insensitive, strip spasi)."""
+    df = normalize_columns(df)
+    rename = {}
+    for col in df.columns:
+        key = col.lower()
+        if key in col_map:
+            rename[col] = col_map[key]
+    return df.rename(columns=rename)
+
+
+def check_required_cols(df, required, label):
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"[{label}] Kolom wajib tidak ditemukan: {missing}. "
+            f"Kolom yang ada: {list(df.columns)}"
+        )
+
+
 def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df):
     warnings_list = []
     shifted_list  = []
     unscheduled   = []
     schedule_rows = []
 
-    # ── Normalisasi master mixer ──────────────────────────────────────────────
-    mixer_df = master_mixer_df.copy()
+    # ── Normalisasi & validasi master mixer ──────────────────────────────────
+    mixer_df = apply_col_map(master_mixer_df, MIXER_COL_MAP)
+    check_required_cols(mixer_df, ["Mixer", "Kapasitas_kg", "Batch_per_Shift"], "Master Mixer")
+
     mixer_df["Mixer"]           = mixer_df["Mixer"].astype(str).str.strip()
     mixer_df["Kapasitas_kg"]    = pd.to_numeric(mixer_df["Kapasitas_kg"],    errors="coerce").fillna(500)
     mixer_df["Batch_per_Shift"] = pd.to_numeric(mixer_df["Batch_per_Shift"], errors="coerce").fillna(2)
-    mixer_df["Grup_Cleaning"]   = mixer_df["Grup_Cleaning"].astype(str).str.strip()
+    if "Grup_Cleaning" not in mixer_df.columns:
+        mixer_df["Grup_Cleaning"] = "DEFAULT"
+    mixer_df["Grup_Cleaning"] = mixer_df["Grup_Cleaning"].astype(str).str.strip()
 
     valid_mixer_set = set(mixer_df["Mixer"].tolist())
 
-    # ── Normalisasi master produk ─────────────────────────────────────────────
-    produk_df = master_produk_df.copy()
-    produk_df["Kode_Produk"]      = produk_df["Kode_Produk"].astype(str).str.strip()
-    produk_df["Kg_per_CS"]        = pd.to_numeric(produk_df["Kg_per_CS"],    errors="coerce").fillna(0)
-    produk_df["Resting_Days"]     = pd.to_numeric(produk_df["Resting_Days"], errors="coerce").fillna(0)
+    # ── Normalisasi & validasi master produk ─────────────────────────────────
+    produk_df = apply_col_map(master_produk_df, PRODUK_COL_MAP)
+    check_required_cols(produk_df, ["Kode_Produk", "Kg_per_CS"], "Master Produk")
+
+    produk_df["Kode_Produk"]   = produk_df["Kode_Produk"].astype(str).str.strip()
+    produk_df["Kg_per_CS"]     = pd.to_numeric(produk_df["Kg_per_CS"],    errors="coerce").fillna(0)
+    produk_df["Resting_Days"]  = pd.to_numeric(produk_df.get("Resting_Days", pd.Series([0]*len(produk_df))), errors="coerce").fillna(0)
+    if "Nama_Produk" not in produk_df.columns:
+        produk_df["Nama_Produk"] = produk_df["Kode_Produk"]
+    if "Kode_MC_Liquid" not in produk_df.columns:
+        produk_df["Kode_MC_Liquid"] = ""
+    if "Grup_Cleaning" not in produk_df.columns:
+        produk_df["Grup_Cleaning"] = "DEFAULT"
+    if "Mixer_Kompatibel" not in produk_df.columns:
+        produk_df["Mixer_Kompatibel"] = ",".join(valid_mixer_set)
+
     produk_df["Grup_Cleaning"]    = produk_df["Grup_Cleaning"].astype(str).str.strip()
     produk_df["Mixer_Kompatibel"] = produk_df["Mixer_Kompatibel"].astype(str).str.strip()
 
     kode_to_row = {row["Kode_Produk"]: row for _, row in produk_df.iterrows()}
 
-    # ── Normalisasi filling plan ──────────────────────────────────────────────
-    fp = filling_plan_df.copy()
+    # ── Normalisasi & validasi filling plan ───────────────────────────────────
+    fp = apply_col_map(filling_plan_df, FILLING_COL_MAP)
+    check_required_cols(fp, ["Kode_Produk", "Target_CS", "Tanggal_Filling"], "Filling Plan")
+
     fp["Kode_Produk"]     = fp["Kode_Produk"].astype(str).str.strip()
     fp["Target_CS"]       = pd.to_numeric(fp["Target_CS"], errors="coerce").fillna(0)
     fp["Tanggal_Filling"] = pd.to_datetime(fp["Tanggal_Filling"])
-    fp["Shift_Filling"]   = pd.to_numeric(fp["Shift_Filling"], errors="coerce").fillna(1).astype(int)
-    fp["Urgent"]          = fp["Urgent"].astype(str).str.strip()
+    if "Shift_Filling" not in fp.columns:
+        fp["Shift_Filling"] = 1
+    fp["Shift_Filling"] = pd.to_numeric(fp["Shift_Filling"], errors="coerce").fillna(1).astype(int)
+    if "Urgent" not in fp.columns:
+        fp["Urgent"] = "Normal"
+    fp["Urgent"] = fp["Urgent"].astype(str).str.strip()
 
     # ── State kapasitas slot ──────────────────────────────────────────────────
-    slot_used = {}   # (date_str, shift, mixer) -> kg terpakai
-    last_grup = {}   # mixer -> Grup_Cleaning produk terakhir
+    slot_used = {}
+    last_grup = {}
 
     def mixer_max_kg(mixer):
         row = mixer_df[mixer_df["Mixer"] == mixer]
@@ -83,19 +198,16 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         for delta in range(window_days):
             d     = deadline_dt - timedelta(days=delta)
             d_str = d.strftime("%Y-%m-%d")
-
             for shift in [3, 2, 1]:
-                # Hard constraint: hari H filling & rest=0 → shift harus < shift_filling
                 if rest_days == 0 and d_str == fill_d_str:
                     if shift >= fill_shift:
                         continue
                 all_slots.append((d_str, shift, delta, shift))
 
-        # Urutkan: delta kecil dulu (dekat deadline), shift besar dulu
         all_slots.sort(key=lambda x: (x[2], -x[3]))
         return [(d_str, shift) for d_str, shift, _, _ in all_slots]
 
-    # ── Urutkan: Urgent dulu, lalu tanggal & shift filling ───────────────────
+    # ── Urutkan: Urgent dulu ──────────────────────────────────────────────────
     fp["_urgent_sort"] = fp["Urgent"].apply(lambda x: 0 if x == "Urgent" else 1)
     fp = fp.sort_values(
         ["_urgent_sort", "Tanggal_Filling", "Shift_Filling"]
@@ -144,11 +256,9 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         for (cdate, shift) in candidate_slots:
             if remaining_kg <= 0:
                 break
-
             for mixer in compat_mixers:
                 if remaining_kg <= 0:
                     break
-
                 rem = slot_remaining(cdate, shift, mixer)
                 if rem <= 0:
                     continue
@@ -157,8 +267,8 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
                 kg_this_slot    = min(remaining_kg, rem)
 
                 use_slot(cdate, shift, mixer, kg_this_slot)
-                remaining_kg     -= kg_this_slot
-                last_grup[mixer]  = grup_clean
+                remaining_kg    -= kg_this_slot
+                last_grup[mixer] = grup_clean
 
                 assigned.append({
                     "Tanggal_Mixing":  cdate,
@@ -193,9 +303,11 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
                     "Original_Fill_Date": fill_date.strftime("%Y-%m-%d"),
                     "New_Fill_Date":      new_fill_date.strftime("%Y-%m-%d"),
                     "Shift_Filling":      fill_shift,
-                    "Alasan":             f"Kapasitas mixer tidak cukup "
-                                          f"(sisa {round(remaining_kg, 1)} kg "
-                                          f"dari {round(total_kg, 1)} kg)",
+                    "Alasan":             (
+                        f"Kapasitas mixer tidak cukup "
+                        f"(sisa {round(remaining_kg, 1)} kg "
+                        f"dari {round(total_kg, 1)} kg)"
+                    ),
                 })
                 warnings_list.append(
                     f"⚠️ {kode} - {nama}: Filling digeser ke "
