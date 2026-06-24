@@ -178,12 +178,19 @@ if schedule_df.empty:
     st.stop()
 
 try:
-    all_dates  = pd.to_datetime(schedule_df["Tanggal_Mixing"])
-    fill_dates = pd.to_datetime(schedule_df["Tanggal_Filling"])
-    date_min   = all_dates.min()
-    date_max   = max(all_dates.max(), fill_dates.max())
+    all_dates = pd.to_datetime(schedule_df["Tanggal_Mixing"])
+    date_min  = all_dates.min()
+
+    # Geser date_min ke Kamis terdekat sebelum/pada hari itu
+    # weekday: 0=Sen, 1=Sel, 2=Rab, 3=Kam, 4=Jum, 5=Sab, 6=Ming
+    days_since_thursday = (date_min.weekday() - 3) % 7
+    start_thursday      = date_min - pd.Timedelta(days=days_since_thursday)
+
+    # 8 hari: Kamis s/d Kamis berikutnya
+    end_thursday = start_thursday + pd.Timedelta(days=7)
+
     date_range = (
-        pd.date_range(start=date_min, end=date_max)
+        pd.date_range(start=start_thursday, end=end_thursday)
         .strftime("%Y-%m-%d")
         .tolist()
     )
