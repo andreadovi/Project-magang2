@@ -27,19 +27,29 @@ def build_pivot(schedule_df, master_mixer, master_produk, date_range):
             col_labels.append(f"{day_name} {date_lbl} S{s}")
 
     mixer_order = list(master_mixer["Mixer"])
-    sched_rows  = schedule_df[~schedule_df["Cleaning"]].copy() if "Cleaning" in schedule_df.columns else schedule_df.copy()
-    sched_rows  = sched_rows[["Mixer", "Kode_Produk", "Produk"]].drop_duplicates()
 
+    # FIX: Pakai Job_ID sebagai row key — bukan (Mixer, Kode_Produk)
+    # sehingga produk duplikat (beda PO) tampil sebagai baris terpisah
+    sched_non_clean = schedule_df[~schedule_df["Cleaning"]].copy() \
+        if "Cleaning" in schedule_df.columns else schedule_df.copy()
+
+    # Unik per Job_ID — ambil atribut dari baris pertama tiap job
+    job_rows = sched_non_clean.groupby("Job_ID", sort=False).first().reset_index()
+
+    # Urutkan: per mixer (sesuai master), lalu per Kode_Produk
+    mixer_order_map = {m: i for i, m in enumerate(mixer_order)}
+    job_rows["_mixer_order"] = job_rows["Mixer"].map(mixer_order_map).fillna(999)
+    job_rows = job_rows.sort_values(["_mixer_order", "Kode_Produk"]).reset_index(drop=True)
+
+    # rows: list of (mixer, kode, nama, job_id)
     rows = []
-    for mixer in mixer_order:
-        mixer_sched = sched_rows[sched_rows["Mixer"] == mixer]
-        for _, r in mixer_sched.iterrows():
-            rows.append((mixer, r["Kode_Produk"], r["Produk"]))
+    for _, r in job_rows.iterrows():
+        rows.append((r["Mixer"], r["Kode_Produk"], r["Produk"], int(r["Job_ID"])))
 
-    pivot_data      = {}
-    cleaning_cells  = set()
-    resting_cells   = set()
-    scheduled_mixer = {}
+    # ── Fill pivot data ───────────────────────────────────────
+    pivot_data     = {}   # job_id -> {(date, shift): kg}
+    cleaning_cells = set()
+    resting_cells  = set()
 
     for _, row in schedule_df.iterrows():
         mx       = row["Mixer"]
@@ -48,22 +58,19 @@ def build_pivot(schedule_df, master_mixer, master_produk, date_range):
         cleaning = row.get("Cleaning", False)
 
         if cleaning:
-            for r in rows:
-                if r[0] == mx:
-                    cleaning_cells.add((mx, r[1], date, shift))
+            # Cleaning: tandai semua job di mixer ini
+            for r_mixer, r_kode, r_nama, r_jid in rows:
+                if r_mixer == mx:
+                    cleaning_cells.add((r_jid, date, shift))
             continue
 
-        kode         = row["Kode_Produk"]
+        jid          = int(row["Job_ID"])
         kg           = float(row["Total_kg"]) if row["Total_kg"] else 0
         resting_days = int(row.get("Resting_Days", 0))
 
-        if kode not in scheduled_mixer:
-            scheduled_mixer[kode] = mx
-
-        key = (mx, kode)
-        if key not in pivot_data:
-            pivot_data[key] = {}
-        pivot_data[key][(date, shift)] = pivot_data[key].get((date, shift), 0) + kg
+        if jid not in pivot_data:
+            pivot_data[jid] = {}
+        pivot_data[jid][(date, shift)] = pivot_data[jid].get((date, shift), 0) + kg
 
         if resting_days > 0:
             mix_dt = datetime.strptime(date, "%Y-%m-%d")
@@ -71,18 +78,19 @@ def build_pivot(schedule_df, master_mixer, master_produk, date_range):
                 rest_dt  = mix_dt + timedelta(days=rd)
                 rest_str = rest_dt.strftime("%Y-%m-%d")
                 for rs in [1, 2, 3]:
-                    resting_cells.add((mx, kode, rest_str, rs))
+                    resting_cells.add((jid, rest_str, rs))
 
+    # ── Build dataframe ───────────────────────────────────────
     records = []
-    for row_mixer, kode, nama in rows:
-        if kode not in scheduled_mixer:
-            continue
-        if scheduled_mixer[kode] != row_mixer:
-            continue
-
-        rec = {"Mixer": row_mixer, "Kode_Produk": kode, "Nama_Produk": nama}
+    for row_mixer, kode, nama, jid in rows:
+        rec = {
+            "Job_ID":      jid,
+            "Mixer":       row_mixer,
+            "Kode_Produk": kode,
+            "Nama_Produk": nama
+        }
         for (d, s), label in zip(col_keys, col_labels):
-            val = pivot_data.get((row_mixer, kode), {}).get((d, s), "")
+            val = pivot_data.get(jid, {}).get((d, s), "")
             rec[label] = val if val != 0 else ""
         records.append(rec)
 
@@ -93,21 +101,14 @@ def build_pivot(schedule_df, master_mixer, master_produk, date_range):
         "col_labels":     col_labels,
         "cleaning_cells": cleaning_cells,
         "resting_cells":  resting_cells,
-        "rows":           rows
+        "rows":           rows   # now (mixer, kode, nama, job_id)
     }
 
 
 def build_filling_pivot(filling_plan, master_produk):
-    """
-    Build pivot jadwal filling:
-    Rows  = (Kode_Produk, Nama_Produk) — satu baris per produk
-    Cols  = per tanggal x 3 shift (range dari filling_plan)
-    Value = Target_CS
-    """
     if filling_plan.empty:
         return pd.DataFrame(), {}
 
-    # Ambil semua tanggal filling, sort
     all_dates = sorted(filling_plan["Tanggal_Filling"].unique())
 
     col_keys   = []
@@ -120,14 +121,11 @@ def build_filling_pivot(filling_plan, master_produk):
             col_keys.append((d, s))
             col_labels.append(f"{day_name} {date_lbl} S{s}")
 
-    # Urutan produk dari master_produk supaya konsisten
-    mp_kodes = list(master_produk["Kode_Produk"].astype(str).str.strip())
+    mp_kodes   = list(master_produk["Kode_Produk"].astype(str).str.strip())
     plan_kodes = list(filling_plan["Kode_Produk"].astype(str).str.strip().unique())
-    # Urutkan sesuai master_produk, sisanya append di belakang
-    ordered_kodes = [k for k in mp_kodes if k in plan_kodes]
+    ordered_kodes  = [k for k in mp_kodes if k in plan_kodes]
     ordered_kodes += [k for k in plan_kodes if k not in ordered_kodes]
 
-    # Build lookup CS: (kode, date, shift) -> CS
     cs_lookup = {}
     for _, row in filling_plan.iterrows():
         kode  = str(row["Kode_Produk"]).strip()
@@ -137,18 +135,15 @@ def build_filling_pivot(filling_plan, master_produk):
         key   = (kode, date, shift)
         cs_lookup[key] = cs_lookup.get(key, 0) + cs
 
-    # Build nama lookup
     nama_lookup = {}
     for _, row in master_produk.iterrows():
         kode = str(row["Kode_Produk"]).strip()
         nama_lookup[kode] = row["Nama_Produk"]
-    # Fallback dari filling_plan
     for _, row in filling_plan.iterrows():
         kode = str(row["Kode_Produk"]).strip()
         if kode not in nama_lookup:
             nama_lookup[kode] = row.get("Nama_Produk", kode)
 
-    # Build urgent lookup — produk urgent di salah satu slot → tandai semua
     urgent_lookup = {}
     for _, row in filling_plan.iterrows():
         kode = str(row["Kode_Produk"]).strip()
@@ -159,12 +154,8 @@ def build_filling_pivot(filling_plan, master_produk):
     for kode in ordered_kodes:
         nama   = nama_lookup.get(kode, kode)
         urgent = "✓" if urgent_lookup.get(kode, False) else ""
-        rec    = {
-            "Urgent":      urgent,
-            "Kode_Produk": kode,
-            "Nama_Produk": nama
-        }
-        total = 0
+        rec    = {"Urgent": urgent, "Kode_Produk": kode, "Nama_Produk": nama}
+        total  = 0
         for (d, s), label in zip(col_keys, col_labels):
             val = cs_lookup.get((kode, d, s), "")
             rec[label] = val if val != 0 else ""
@@ -173,20 +164,14 @@ def build_filling_pivot(filling_plan, master_produk):
         rec["Total_CS"] = total
         records.append(rec)
 
-    filling_pivot_df = pd.DataFrame(records)
-
-    return filling_pivot_df, {
-        "col_keys":   col_keys,
-        "col_labels": col_labels
-    }
+    return pd.DataFrame(records), {"col_keys": col_keys, "col_labels": col_labels}
 
 
 def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
-    """Tulis sheet jadwal mixing ke worksheet yang sudah ada."""
     col_keys       = meta["col_keys"]
     cleaning       = meta["cleaning_cells"]
     resting        = meta["resting_cells"]
-    rows           = meta["rows"]
+    rows           = meta["rows"]   # (mixer, kode, nama, job_id)
     DATA_START_COL = 4
 
     hdr_fill    = PatternFill("solid", fgColor="1F4E79")
@@ -202,7 +187,6 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
     thin        = Side(style="thin", color="BFBFBF")
     border      = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # Row 1 fixed headers
     for col, label in [(1, "Mixer"), (2, "Kode\nProduk"), (3, "Nama Produk")]:
         cell           = ws.cell(row=1, column=col, value=label)
         cell.fill      = hdr_fill
@@ -210,7 +194,6 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
         cell.alignment = center
         ws.merge_cells(start_row=1, end_row=2, start_column=col, end_column=col)
 
-    # Row 1 date headers — merge 3 shift per tanggal
     date_groups = {}
     for i, (d, s) in enumerate(col_keys):
         date_groups.setdefault(d, []).append(DATA_START_COL + i)
@@ -228,7 +211,6 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
             ws.merge_cells(start_row=1, end_row=1,
                            start_column=start_col, end_column=end_col)
 
-    # Row 2 shift headers
     for i, (d, s) in enumerate(col_keys):
         col        = DATA_START_COL + i
         cell       = ws.cell(row=2, column=col, value=f"Shift {s}")
@@ -236,21 +218,16 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
         cell.font  = subhdr_font
         cell.alignment = center
 
-    # Data rows
     mixer_list = list(master_mixer["Mixer"])
     cur_row    = 3
 
     for mixer in mixer_list:
-        mixer_rows = [
-            (m, k, n) for m, k, n in rows
-            if m == mixer and
-            not pivot_df[(pivot_df["Mixer"] == m) & (pivot_df["Kode_Produk"] == k)].empty
-        ]
+        mixer_rows = [(m, k, n, jid) for m, k, n, jid in rows if m == mixer]
         if not mixer_rows:
             continue
         mixer_start = cur_row
 
-        for ri, (m, kode, nama) in enumerate(mixer_rows):
+        for ri, (m, kode, nama, jid) in enumerate(mixer_rows):
             ws.cell(row=cur_row, column=1, value=mixer if ri == 0 else "")
             ws.cell(row=cur_row, column=2, value=kode).alignment = center
             ws.cell(row=cur_row, column=3, value=nama).alignment = center
@@ -263,10 +240,10 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
                 cell.alignment = center
                 cell.border    = border
 
-                if (mixer, kode, d, s) in cleaning:
+                if (jid, d, s) in cleaning:
                     cell.fill  = clean_fill
                     cell.value = ""
-                elif (mixer, kode, d, s) in resting:
+                elif (jid, d, s) in resting:
                     cell.fill  = rest_fill
                     cell.value = ""
                 else:
@@ -274,10 +251,7 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
                     dt_lbl   = datetime.strptime(d, "%Y-%m-%d").strftime("%d %b")
                     label    = f"{day_name} {dt_lbl} S{s}"
                     if label in pivot_df.columns:
-                        val_series = pivot_df.loc[
-                            (pivot_df["Mixer"] == mixer) &
-                            (pivot_df["Kode_Produk"] == kode), label
-                        ]
+                        val_series = pivot_df.loc[pivot_df["Job_ID"] == jid, label]
                         v = val_series.values[0] if len(val_series) > 0 else ""
                     else:
                         v = ""
@@ -294,7 +268,6 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
         cell_mixer.font      = Font(bold=True)
         cell_mixer.alignment = center
 
-    # Legend
     cur_row += 1
     ws.cell(row=cur_row, column=1, value="Keterangan:").font = Font(bold=True)
     legends = [
@@ -308,7 +281,6 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
         cell.border = border
         ws.cell(row=cur_row, column=col + 1, value=label)
 
-    # Column widths
     ws.column_dimensions["A"].width = 12
     ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 22
@@ -319,14 +291,13 @@ def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
 
 
 def _write_filling_sheet(ws, filling_pivot_df, meta):
-    """Tulis sheet jadwal filling ke worksheet yang sudah ada."""
     if filling_pivot_df.empty:
         ws.cell(row=1, column=1, value="Tidak ada data filling.")
         return
 
     col_keys       = meta["col_keys"]
     col_labels     = meta["col_labels"]
-    DATA_START_COL = 4  # Urgent | Kode | Nama | ... shift cols ... | Total
+    DATA_START_COL = 4
 
     hdr_fill    = PatternFill("solid", fgColor="1F4E79")
     hdr_font    = Font(bold=True, color="FFFFFF")
@@ -340,7 +311,6 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
     thin        = Side(style="thin", color="BFBFBF")
     border      = Border(left=thin, right=thin, top=thin, bottom=thin)
 
-    # Row 1: fixed headers (Urgent, Kode, Nama) — merge 2 baris
     for col, label in [(1, "Urgent"), (2, "Kode\nProduk"), (3, "Nama Produk")]:
         cell           = ws.cell(row=1, column=col, value=label)
         cell.fill      = hdr_fill
@@ -348,7 +318,6 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
         cell.alignment = center
         ws.merge_cells(start_row=1, end_row=2, start_column=col, end_column=col)
 
-    # Row 1: date headers — merge 3 shift per tanggal
     date_groups = {}
     for i, (d, s) in enumerate(col_keys):
         date_groups.setdefault(d, []).append(DATA_START_COL + i)
@@ -366,7 +335,6 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
             ws.merge_cells(start_row=1, end_row=1,
                            start_column=start_col, end_column=end_col)
 
-    # Total header
     total_col = DATA_START_COL + len(col_keys)
     cell      = ws.cell(row=1, column=total_col, value="Total CS")
     cell.fill      = hdr_fill
@@ -375,7 +343,6 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
     ws.merge_cells(start_row=1, end_row=2,
                    start_column=total_col, end_column=total_col)
 
-    # Row 2: shift headers
     for i, (d, s) in enumerate(col_keys):
         col        = DATA_START_COL + i
         cell       = ws.cell(row=2, column=col, value=f"Shift {s}")
@@ -383,41 +350,27 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
         cell.font  = subhdr_font
         cell.alignment = center
 
-    # Data rows
     for ri, (_, row) in enumerate(filling_pivot_df.iterrows()):
         cur_row   = ri + 3
         is_urgent = row["Urgent"] == "✓"
         row_bg    = urgent_fill if is_urgent else (alt_fill if ri % 2 == 0 else empty_fill)
 
-        # Urgent
-        cell           = ws.cell(row=cur_row, column=1, value=row["Urgent"])
-        cell.alignment = center
-        cell.fill      = row_bg
-        cell.border    = border
+        for col, val in [(1, row["Urgent"]), (2, row["Kode_Produk"]), (3, row["Nama_Produk"])]:
+            cell           = ws.cell(row=cur_row, column=col, value=val)
+            cell.alignment = center if col != 3 else Alignment(vertical="center")
+            cell.fill      = row_bg
+            cell.border    = border
 
-        # Kode
-        cell           = ws.cell(row=cur_row, column=2, value=row["Kode_Produk"])
-        cell.alignment = center
-        cell.fill      = row_bg
-        cell.border    = border
-
-        # Nama
-        cell      = ws.cell(row=cur_row, column=3, value=row["Nama_Produk"])
-        cell.fill = row_bg
-        cell.border = border
-
-        # Shift columns
         for i, label in enumerate(col_labels):
             col  = DATA_START_COL + i
             val  = row.get(label, "")
             cell = ws.cell(row=cur_row, column=col, value=val if val != "" else None)
-            cell.alignment = center
-            cell.border    = border
-            cell.fill      = row_bg
+            cell.alignment    = center
+            cell.border       = border
+            cell.fill         = row_bg
             if val != "" and val is not None:
                 cell.number_format = "0.##"
 
-        # Total CS
         cell           = ws.cell(row=cur_row, column=total_col, value=row["Total_CS"])
         cell.alignment = center
         cell.fill      = total_fill
@@ -425,7 +378,6 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
         cell.border    = border
         cell.number_format = "0.##"
 
-    # Grand total row
     grand_row = len(filling_pivot_df) + 3
     ws.cell(row=grand_row, column=3, value="TOTAL").font = Font(bold=True)
     ws.cell(row=grand_row, column=3).fill = total_fill
@@ -452,14 +404,12 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
     cell.border       = border
     cell.number_format = "0.##"
 
-    # Legend
     ws.cell(row=grand_row + 2, column=1, value="Keterangan:").font = Font(bold=True)
     leg_cell = ws.cell(row=grand_row + 2, column=2)
     leg_cell.fill   = urgent_fill
     leg_cell.border = border
     ws.cell(row=grand_row + 2, column=3, value="Produk Urgent")
 
-    # Column widths
     ws.column_dimensions["A"].width = 8
     ws.column_dimensions["B"].width = 12
     ws.column_dimensions["C"].width = 22
@@ -471,14 +421,8 @@ def _write_filling_sheet(ws, filling_pivot_df, meta):
 
 
 def pivot_to_excel(pivot_df, meta, master_mixer, filling_plan=None, master_produk=None):
-    """
-    Generate Excel dengan 2 sheet:
-    1. Jadwal Mixing
-    2. Jadwal Filling (jika filling_plan disediakan)
-    """
     wb = Workbook()
 
-    # ── Sheet 1: Jadwal Mixing ────────────────────────────────
     ws_mix       = wb.active
     ws_mix.title = "Jadwal Mixing"
     if not pivot_df.empty:
@@ -486,7 +430,6 @@ def pivot_to_excel(pivot_df, meta, master_mixer, filling_plan=None, master_produ
     else:
         ws_mix.cell(row=1, column=1, value="Tidak ada jadwal mixing.")
 
-    # ── Sheet 2: Jadwal Filling ───────────────────────────────
     ws_fill       = wb.create_sheet("Jadwal Filling")
     if filling_plan is not None and not filling_plan.empty:
         mp = master_produk if master_produk is not None else pd.DataFrame()
