@@ -1,7 +1,10 @@
 # scheduler.py
+import re
 import pandas as pd
 from datetime import datetime, timedelta
 
+
+# ─── Helpers ──────────────────────────────────────────────────────────────────
 
 def parse_mixer_compat(raw, valid_mixer_set):
     raw_str = str(raw).strip()
@@ -19,10 +22,10 @@ def kg_needed(target_cs, kg_per_cs):
 
 
 def normalize_columns(df):
-    """Normalisasi nama kolom: strip spasi, replace spasi dengan _, title→snake case."""
     df = df.copy()
     df.columns = (
         df.columns
+        .astype(str)
         .str.strip()
         .str.replace(r"\s+", "_", regex=True)
         .str.replace(r"[^\w]", "", regex=True)
@@ -30,8 +33,28 @@ def normalize_columns(df):
     return df
 
 
+def apply_col_map(df, col_map):
+    df = normalize_columns(df)
+    rename = {}
+    for col in df.columns:
+        key = col.lower()
+        if key in col_map:
+            rename[col] = col_map[key]
+    return df.rename(columns=rename)
+
+
+def check_required_cols(df, required, label):
+    missing = [c for c in required if c not in df.columns]
+    if missing:
+        raise ValueError(
+            f"[{label}] Kolom wajib tidak ditemukan: {missing}. "
+            f"Kolom yang ada: {list(df.columns)}"
+        )
+
+
+# ─── Column Maps ──────────────────────────────────────────────────────────────
+
 FILLING_COL_MAP = {
-    # Variasi nama kolom yang mungkin ada di file Excel
     "kode_produk":     "Kode_Produk",
     "kodeproduk":      "Kode_Produk",
     "kode":            "Kode_Produk",
@@ -92,25 +115,121 @@ PRODUK_COL_MAP = {
 }
 
 
-def apply_col_map(df, col_map):
-    """Rename kolom berdasarkan mapping (case-insensitive, strip spasi)."""
-    df = normalize_columns(df)
+# ─── Unpivot Filling Plan (format kalender → format panjang) ──────────────────
+
+def unpivot_filling_plan(df):
+    """
+    Konversi Filling Plan format kalender (wide) → format panjang (long).
+
+    Format wide  : baris = produk, kolom = tanggal+shift, nilai = Target CS
+    Format panjang: setiap baris = 1 produk × 1 tanggal × 1 shift × Target CS
+
+    Jika sudah format panjang (ada kolom Tanggal_Filling & Target_CS),
+    dikembalikan langsung tanpa perubahan.
+    """
+    df = df.copy()
+    df.columns = df.columns.astype(str).str.strip()
+
+    # ── Cek apakah sudah format panjang ──────────────────────────────────────
+    norm_cols = [c.lower().replace(" ", "_") for c in df.columns]
+    has_tanggal = any("tanggal" in c or "filling_date" in c for c in norm_cols)
+    has_target  = any("target" in c or "qty" in c or "quantity" in c for c in norm_cols)
+    if has_tanggal and has_target:
+        return df  # Sudah format panjang
+
+    # ── Deteksi kolom tetap ───────────────────────────────────────────────────
+    fixed_cols = []
+    for c in df.columns:
+        cl = c.lower().replace(" ", "_")
+        if any(k in cl for k in ["kode", "nama", "urgent", "prioritas", "priority"]):
+            fixed_cols.append(c)
+
+    value_cols = [c for c in df.columns if c not in fixed_cols]
+
+    if not value_cols:
+        return df
+
+    # ── Melt ke format panjang ────────────────────────────────────────────────
+    melted = df.melt(
+        id_vars=fixed_cols,
+        value_vars=value_cols,
+        var_name="_col_header",
+        value_name="Target_CS",
+    )
+
+    melted["Target_CS"] = pd.to_numeric(melted["Target_CS"], errors="coerce")
+    melted = melted[melted["Target_CS"].notna() & (melted["Target_CS"] > 0)].copy()
+
+    if melted.empty:
+        return pd.DataFrame(columns=[
+            "Kode_Produk", "Target_CS", "Tanggal_Filling", "Shift_Filling", "Urgent"
+        ])
+
+    # ── Parse header kolom → Tanggal_Filling + Shift_Filling ─────────────────
+    def parse_col(header):
+        header = str(header).strip()
+
+        # Format DD/MM/YYYY atau DD-MM-YYYY
+        m = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", header)
+        if m:
+            try:
+                d, mo, y = int(m.group(1)), int(m.group(2)), int(m.group(3))
+                if y < 100:
+                    y += 2000
+                tanggal = datetime(y, mo, d)
+            except Exception:
+                return None, None
+        else:
+            # Format YYYY-MM-DD atau YYYY/MM/DD
+            m2 = re.search(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})", header)
+            if m2:
+                try:
+                    tanggal = datetime(
+                        int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
+                    )
+                except Exception:
+                    return None, None
+            else:
+                return None, None
+
+        # Ekstrak shift (S1 / S2 / S3)
+        ms = re.search(r"[Ss](\d)", header)
+        shift = int(ms.group(1)) if ms else 1
+        return tanggal.strftime("%Y-%m-%d"), shift
+
+    parsed = melted["_col_header"].apply(lambda h: pd.Series(parse_col(h)))
+    melted["Tanggal_Filling"] = parsed[0]
+    melted["Shift_Filling"]   = parsed[1]
+
+    # Buang baris yang gagal parse tanggal
+    melted = melted[melted["Tanggal_Filling"].notna()].copy()
+    melted = melted.drop(columns=["_col_header"])
+
+    # ── Rename kolom tetap ────────────────────────────────────────────────────
     rename = {}
-    for col in df.columns:
-        key = col.lower()
-        if key in col_map:
-            rename[col] = col_map[key]
-    return df.rename(columns=rename)
+    for c in melted.columns:
+        cl = c.lower().replace(" ", "_")
+        if "kode" in cl and "produk" in cl:
+            rename[c] = "Kode_Produk"
+        elif any(k in cl for k in ["urgent", "prioritas", "priority"]):
+            rename[c] = "Urgent"
+    melted = melted.rename(columns=rename)
+
+    if "Urgent" not in melted.columns:
+        melted["Urgent"] = "Normal"
+    if "Shift_Filling" not in melted.columns:
+        melted["Shift_Filling"] = 1
+
+    melted["Shift_Filling"] = (
+        pd.to_numeric(melted["Shift_Filling"], errors="coerce")
+        .fillna(1)
+        .astype(int)
+    )
+
+    return melted.reset_index(drop=True)
 
 
-def check_required_cols(df, required, label):
-    missing = [c for c in required if c not in df.columns]
-    if missing:
-        raise ValueError(
-            f"[{label}] Kolom wajib tidak ditemukan: {missing}. "
-            f"Kolom yang ada: {list(df.columns)}"
-        )
-
+# ─── Main Scheduler ───────────────────────────────────────────────────────────
 
 def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df):
     warnings_list = []
@@ -135,9 +254,13 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
     produk_df = apply_col_map(master_produk_df, PRODUK_COL_MAP)
     check_required_cols(produk_df, ["Kode_Produk", "Kg_per_CS"], "Master Produk")
 
-    produk_df["Kode_Produk"]   = produk_df["Kode_Produk"].astype(str).str.strip()
-    produk_df["Kg_per_CS"]     = pd.to_numeric(produk_df["Kg_per_CS"],    errors="coerce").fillna(0)
-    produk_df["Resting_Days"]  = pd.to_numeric(produk_df.get("Resting_Days", pd.Series([0]*len(produk_df))), errors="coerce").fillna(0)
+    produk_df["Kode_Produk"] = produk_df["Kode_Produk"].astype(str).str.strip()
+    produk_df["Kg_per_CS"]   = pd.to_numeric(produk_df["Kg_per_CS"], errors="coerce").fillna(0)
+
+    if "Resting_Days" not in produk_df.columns:
+        produk_df["Resting_Days"] = 0
+    produk_df["Resting_Days"] = pd.to_numeric(produk_df["Resting_Days"], errors="coerce").fillna(0)
+
     if "Nama_Produk" not in produk_df.columns:
         produk_df["Nama_Produk"] = produk_df["Kode_Produk"]
     if "Kode_MC_Liquid" not in produk_df.columns:
@@ -159,16 +282,18 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
     fp["Kode_Produk"]     = fp["Kode_Produk"].astype(str).str.strip()
     fp["Target_CS"]       = pd.to_numeric(fp["Target_CS"], errors="coerce").fillna(0)
     fp["Tanggal_Filling"] = pd.to_datetime(fp["Tanggal_Filling"])
+
     if "Shift_Filling" not in fp.columns:
         fp["Shift_Filling"] = 1
     fp["Shift_Filling"] = pd.to_numeric(fp["Shift_Filling"], errors="coerce").fillna(1).astype(int)
+
     if "Urgent" not in fp.columns:
         fp["Urgent"] = "Normal"
     fp["Urgent"] = fp["Urgent"].astype(str).str.strip()
 
     # ── State kapasitas slot ──────────────────────────────────────────────────
-    slot_used = {}
-    last_grup = {}
+    slot_used = {}   # (date_str, shift, mixer) -> kg terpakai
+    last_grup = {}   # mixer -> Grup_Cleaning produk terakhir
 
     def mixer_max_kg(mixer):
         row = mixer_df[mixer_df["Mixer"] == mixer]
@@ -178,9 +303,7 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         return float(r["Kapasitas_kg"]) * float(r["Batch_per_Shift"])
 
     def slot_remaining(date_str, shift, mixer):
-        max_kg = mixer_max_kg(mixer)
-        used   = slot_used.get((date_str, shift, mixer), 0.0)
-        return max(0.0, max_kg - used)
+        return max(0.0, mixer_max_kg(mixer) - slot_used.get((date_str, shift, mixer), 0.0))
 
     def use_slot(date_str, shift, mixer, kg):
         key = (date_str, shift, mixer)
@@ -199,15 +322,14 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
             d     = deadline_dt - timedelta(days=delta)
             d_str = d.strftime("%Y-%m-%d")
             for shift in [3, 2, 1]:
-                if rest_days == 0 and d_str == fill_d_str:
-                    if shift >= fill_shift:
-                        continue
+                if rest_days == 0 and d_str == fill_d_str and shift >= fill_shift:
+                    continue
                 all_slots.append((d_str, shift, delta, shift))
 
         all_slots.sort(key=lambda x: (x[2], -x[3]))
         return [(d_str, shift) for d_str, shift, _, _ in all_slots]
 
-    # ── Urutkan: Urgent dulu ──────────────────────────────────────────────────
+    # ── Urutkan: Urgent dulu, lalu tanggal & shift ───────────────────────────
     fp["_urgent_sort"] = fp["Urgent"].apply(lambda x: 0 if x == "Urgent" else 1)
     fp = fp.sort_values(
         ["_urgent_sort", "Tanggal_Filling", "Shift_Filling"]
@@ -251,9 +373,7 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         remaining_kg = total_kg
         assigned     = []
 
-        candidate_slots = get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6)
-
-        for (cdate, shift) in candidate_slots:
+        for (cdate, shift) in get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
             if remaining_kg <= 0:
                 break
             for mixer in compat_mixers:
@@ -303,7 +423,7 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
                     "Original_Fill_Date": fill_date.strftime("%Y-%m-%d"),
                     "New_Fill_Date":      new_fill_date.strftime("%Y-%m-%d"),
                     "Shift_Filling":      fill_shift,
-                    "Alasan":             (
+                    "Alasan": (
                         f"Kapasitas mixer tidak cukup "
                         f"(sisa {round(remaining_kg, 1)} kg "
                         f"dari {round(total_kg, 1)} kg)"
