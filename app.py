@@ -362,21 +362,20 @@ with tab3:
                 )
 
                 if not pivot_df.empty:
-                    def style_pivot(row):
-                        styles = [""] * len(row)
-                        mixer  = row.get("Mixer", "")
-                        kode   = row.get("Kode_Produk", "")
-                        cols   = list(row.index)
-                        for i, label in enumerate(meta["col_labels"]):
-                            d_key, s = meta["col_keys"][i]
-                            if label not in cols:
-                                continue
-                            pos = cols.index(label)
-                            if (mixer, kode, d_key, s) in meta["cleaning_cells"]:
-                                styles[pos] = "background-color: #BDD7EE"
-                            elif (mixer, kode, d_key, s) in meta["resting_cells"]:
-                                styles[pos] = "background-color: #FFE699"
-                        return styles
+                        def style_pivot(row):
+                            styles = [""] * len(row)
+                            jid    = row.get("Job_ID", 0)
+                            cols   = list(row.index)
+                            for i, label in enumerate(meta["col_labels"]):
+                                d_key, s = meta["col_keys"][i]
+                                if label not in cols:
+                                    continue
+                                pos = cols.index(label)
+                                if (jid, d_key, s) in meta["cleaning_cells"]:
+                                    styles[pos] = "background-color: #BDD7EE"
+                                elif (jid, d_key, s) in meta["resting_cells"]:
+                                    styles[pos] = "background-color: #FFE699"
+                            return styles
 
                     st.dataframe(
                         pivot_df.style.apply(style_pivot, axis=1),
