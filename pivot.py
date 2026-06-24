@@ -8,7 +8,6 @@ from datetime import datetime, timedelta
 
 DAYS_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
-# ─── Style constants ──────────────────────────────────────────────────────────
 FILL_HEADER_DARK  = PatternFill("solid", fgColor="1F4E79")
 FILL_HEADER_LIGHT = PatternFill("solid", fgColor="BDD7EE")
 FILL_CLEANING     = PatternFill("solid", fgColor="BDD7EE")
@@ -31,21 +30,10 @@ REQUIRED_COLS = [
 ]
 
 
-# ─── Build pivot DataFrame ────────────────────────────────────────────────────
-
 def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
-    """
-    Baris  = (Mixer, Kode_Produk)
-    Kolom  = setiap (tanggal, shift) dalam date_range
-
-    Returns:
-        pivot_df : DataFrame siap tampil
-        meta     : dict { col_keys, col_labels, cleaning_cells, resting_cells, date_range }
-    """
     if schedule_df is None or schedule_df.empty:
         return pd.DataFrame(), {}
 
-    # Guard kolom wajib
     missing = [c for c in REQUIRED_COLS if c not in schedule_df.columns]
     if missing:
         return pd.DataFrame(), {}
@@ -67,14 +55,14 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
 
     # ── Normalisasi schedule ──────────────────────────────────────────────────
     sdf = schedule_df.copy()
-    sdf["Tanggal_Mixing"] = sdf["Tanggal_Mixing"].astype(str).str.strip()
-    sdf["Shift_Mixing"]   = pd.to_numeric(sdf["Shift_Mixing"], errors="coerce").fillna(1).astype(int)
-    sdf["Mixer"]          = sdf["Mixer"].astype(str).str.strip()
-    sdf["Kode_Produk"]    = sdf["Kode_Produk"].astype(str).str.strip()
-    sdf["Kg_Mixing"]      = pd.to_numeric(sdf["Kg_Mixing"], errors="coerce").fillna(0)
-    sdf["Cleaning"]       = sdf["Cleaning"].fillna(False).astype(bool)
-    sdf["Resting_Days"]   = pd.to_numeric(sdf["Resting_Days"], errors="coerce").fillna(0)
-    sdf["Tanggal_Filling"]= sdf["Tanggal_Filling"].astype(str).str.strip()
+    sdf["Tanggal_Mixing"]  = sdf["Tanggal_Mixing"].astype(str).str.strip()
+    sdf["Shift_Mixing"]    = pd.to_numeric(sdf["Shift_Mixing"], errors="coerce").fillna(1).astype(int)
+    sdf["Mixer"]           = sdf["Mixer"].astype(str).str.strip()
+    sdf["Kode_Produk"]     = sdf["Kode_Produk"].astype(str).str.strip()
+    sdf["Kg_Mixing"]       = pd.to_numeric(sdf["Kg_Mixing"], errors="coerce").fillna(0)
+    sdf["Cleaning"]        = sdf["Cleaning"].fillna(False).astype(bool)
+    sdf["Resting_Days"]    = pd.to_numeric(sdf["Resting_Days"], errors="coerce").fillna(0)
+    sdf["Tanggal_Filling"] = sdf["Tanggal_Filling"].astype(str).str.strip()
 
     # ── Kumpulkan kombinasi (mixer, kode) unik ────────────────────────────────
     combos = (
@@ -131,7 +119,6 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
                 else:
                     row_data[(d_str, s)] = f"{round(kg_val, 1)} kg"
             else:
-                # Cek resting period
                 in_resting = False
                 if rest_days > 0 and fill_date is not None and not sub.empty:
                     try:
@@ -154,7 +141,6 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
     if not rows:
         return pd.DataFrame(), {}
 
-    # ── Build DataFrame ───────────────────────────────────────────────────────
     rename_map = {ck: cl for ck, cl in zip(col_keys, col_labels)}
     pivot_df   = pd.DataFrame(rows).rename(columns=rename_map)
 
@@ -168,10 +154,7 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
     return pivot_df, meta
 
 
-# ─── Export ke Excel ──────────────────────────────────────────────────────────
-
 def pivot_to_excel(pivot_df, meta, master_mixer_df):
-    """Export pivot ke Excel dengan formatting lengkap."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Jadwal Mixing"
@@ -187,7 +170,7 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
     FIXED_COLS = ["Mixer", "Kode_Produk", "Kode_MC_Liquid", "Nama_Produk", "Grup_Cleaning"]
     n_fixed    = len(FIXED_COLS)
 
-    # ── Row 1: kolom tetap (merge 2 baris) + header tanggal (merge 3 kolom) ──
+    # Row 1: header tetap (merge 2 baris) + header tanggal (merge 3 kolom)
     for ci, h in enumerate(FIXED_COLS, 1):
         c = ws.cell(row=1, column=ci, value=h)
         c.fill      = FILL_HEADER_DARK
@@ -209,14 +192,14 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
         )
         col_cursor += 3
 
-    # ── Row 2: shift header ───────────────────────────────────────────────────
+    # Row 2: shift header
     for ci, (d_str, s) in enumerate(col_keys):
         c = ws.cell(row=2, column=n_fixed + 1 + ci, value=f"S{s}")
         c.fill      = FILL_HEADER_LIGHT
         c.font      = FONT_BOLD
         c.alignment = ALIGN_CENTER
 
-    # ── Data rows ─────────────────────────────────────────────────────────────
+    # Data rows
     for ri, (_, row) in enumerate(pivot_df.iterrows(), 3):
         mixer = str(row.get("Mixer", ""))
         kode  = str(row.get("Kode_Produk", ""))
@@ -241,7 +224,7 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
             elif val and val != "":
                 c.fill = FILL_MIXING
 
-    # ── Column widths ─────────────────────────────────────────────────────────
+    # Column widths
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 14
@@ -254,7 +237,7 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
     ws.row_dimensions[2].height = 20
     ws.freeze_panes = "F3"
 
-    # ── Sheet Keterangan ──────────────────────────────────────────────────────
+    # Sheet Keterangan
     ws2 = wb.create_sheet("Keterangan")
     legends = [
         ("Warna",          "Arti"),
@@ -263,12 +246,4 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
         ("Kuning (💤)",    "Periode resting (menunggu filling)"),
         ("Kosong",         "Tidak ada aktivitas"),
     ]
-    for ri, (a, b) in enumerate(legends, 1):
-        ws2.cell(row=ri, column=1, value=a).font = FONT_BOLD
-        ws2.cell(row=ri, column=2, value=b)
-    ws2.column_dimensions["A"].width = 22
-    ws2.column_dimensions["B"].width = 40
-
-    buf = io.BytesIO()
-    wb.save(buf)
-    return buf.getvalue()
+    for ri, (a, b) in enumerate(legends, 
