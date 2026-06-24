@@ -141,7 +141,6 @@ def unpivot_filling_plan(df):
             fixed_cols.append(c)
 
     value_cols = [c for c in df.columns if c not in fixed_cols]
-
     if not value_cols:
         return df
 
@@ -164,8 +163,6 @@ def unpivot_filling_plan(df):
     # Parse header kolom → Tanggal_Filling + Shift_Filling
     def parse_col(header):
         header = str(header).strip()
-
-        # Format DD/MM/YYYY atau DD-MM-YYYY
         m = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", header)
         if m:
             try:
@@ -176,7 +173,6 @@ def unpivot_filling_plan(df):
             except Exception:
                 return None, None
         else:
-            # Format YYYY-MM-DD
             m2 = re.search(r"(\d{4})[/\-](\d{1,2})[/\-](\d{1,2})", header)
             if m2:
                 try:
@@ -222,6 +218,28 @@ def unpivot_filling_plan(df):
 
 
 # ─── Main Scheduler ───────────────────────────────────────────────────────────
+
+def get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
+    deadline_dt = fill_date - timedelta(days=max(rest_days, 0))
+    fill_d_str  = fill_date.strftime("%Y-%m-%d")
+    all_slots   = []
+    for delta in range(window_days):
+        d     = deadline_dt - timedelta(days=delta)
+        d_str = d.strftime("%Y-%m-%d")
+
+        # Minggu (weekday=6) diberi penalti → dipakai terakhir
+        is_sunday   = (d.weekday() == 6)
+        day_penalty = 100 if is_sunday else 0
+
+        for shift in [3, 2, 1]:
+            if rest_days == 0 and d_str == fill_d_str and shift >= fill_shift:
+                continue
+            all_slots.append((d_str, shift, delta, shift, day_penalty))
+
+    # Utamakan non-Minggu, lalu terdekat deadline, lalu shift terbesar
+    all_slots.sort(key=lambda x: (x[4], x[2], -x[3]))
+    return [(d_str, shift) for d_str, shift, _, _, _ in all_slots]
+
 
 def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df):
     warnings_list = []
@@ -307,28 +325,6 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
     def needs_cleaning(mixer, grup_produk):
         prev = last_grup.get(mixer)
         return False if prev is None else prev != grup_produk
-
-    def get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
-    deadline_dt = fill_date - timedelta(days=max(rest_days, 0))
-    fill_d_str  = fill_date.strftime("%Y-%m-%d")
-    all_slots   = []
-    for delta in range(window_days):
-        d     = deadline_dt - timedelta(days=delta)
-        d_str = d.strftime("%Y-%m-%d")
-
-        # Minggu (weekday=6) diberi penalti prioritas tinggi
-        # → dipakai terakhir, hanya jika hari lain full
-        is_sunday = (d.weekday() == 6)
-        day_penalty = 100 if is_sunday else 0
-
-        for shift in [3, 2, 1]:
-            if rest_days == 0 and d_str == fill_d_str and shift >= fill_shift:
-                continue
-            all_slots.append((d_str, shift, delta, shift, day_penalty))
-
-    # Sort: utamakan non-Minggu (day_penalty=0), lalu terdekat deadline, lalu shift terbesar
-    all_slots.sort(key=lambda x: (x[4], x[2], -x[3]))
-    return [(d_str, shift) for d_str, shift, _, _, _ in all_slots]
 
     # Urutkan: Urgent dulu
     fp["_urgent_sort"] = fp["Urgent"].apply(lambda x: 0 if x == "Urgent" else 1)
