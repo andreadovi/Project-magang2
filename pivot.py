@@ -1,442 +1,245 @@
-import pandas as pd
+# pivot.py
 import io
-from datetime import datetime, timedelta
+import pandas as pd
 from openpyxl import Workbook
 from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
+from datetime import datetime, timedelta
 
 DAYS_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
+# ─── Style constants ──────────────────────────────────────────────────────────
+FILL_HEADER_DARK  = PatternFill("solid", fgColor="1F4E79")
+FILL_HEADER_LIGHT = PatternFill("solid", fgColor="BDD7EE")
+FILL_CLEANING     = PatternFill("solid", fgColor="BDD7EE")
+FILL_RESTING      = PatternFill("solid", fgColor="FFE699")
+FILL_MIXING       = PatternFill("solid", fgColor="E2EFDA")
+FONT_WHITE_BOLD   = Font(bold=True, color="FFFFFF")
+FONT_BOLD         = Font(bold=True)
+ALIGN_CENTER      = Alignment(horizontal="center", vertical="center", wrap_text=True)
+ALIGN_LEFT        = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+THIN_BORDER = Border(
+    left=Side(style="thin"), right=Side(style="thin"),
+    top=Side(style="thin"),  bottom=Side(style="thin"),
+)
 
-def date_to_day(date_str):
-    return DAYS_ID[datetime.strptime(str(date_str), "%Y-%m-%d").weekday()]
 
+# ─── Build pivot DataFrame ────────────────────────────────────────────────────
 
-def build_pivot(schedule_df, master_mixer, master_produk, date_range):
+def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
+    """
+    Baris  = (Mixer, Kode_Produk, Nama_Produk)
+    Kolom  = setiap (tanggal, shift) dalam date_range
+
+    Returns:
+        pivot_df : DataFrame siap tampil
+        meta     : dict { col_keys, col_labels, cleaning_cells, resting_cells, date_range }
+    """
     if schedule_df.empty:
         return pd.DataFrame(), {}
 
-    col_keys   = []
-    col_labels = []
-    for d in date_range:
-        day_name = date_to_day(d)
-        dt       = datetime.strptime(d, "%Y-%m-%d")
-        date_lbl = dt.strftime("%d %b")
+    mixer_df = master_mixer_df.copy()
+    mixer_df["Mixer"] = mixer_df["Mixer"].astype(str).str.strip()
+    mixer_order = list(mixer_df["Mixer"])
+
+    # ── Bangun kolom ──────────────────────────────────────────────────────────
+    col_keys   = []   # list of (date_str, shift_int)
+    col_labels = []   # label tampilan dengan \n
+
+    for d_str in date_range:
+        d = datetime.strptime(d_str, "%Y-%m-%d")
+        day_lbl = f"{DAYS_ID[d.weekday()]}\n{d.strftime('%d/%m')}"
         for s in [1, 2, 3]:
-            col_keys.append((d, s))
-            col_labels.append(f"{day_name} {date_lbl} S{s}")
+            col_keys.append((d_str, s))
+            col_labels.append(f"{day_lbl}\nS{s}")
 
-    mixer_order = list(master_mixer["Mixer"])
+    # ── Normalisasi schedule ──────────────────────────────────────────────────
+    sdf = schedule_df.copy()
+    sdf["Tanggal_Mixing"] = sdf["Tanggal_Mixing"].astype(str).str.strip()
+    sdf["Shift_Mixing"]   = pd.to_numeric(sdf["Shift_Mixing"], errors="coerce").fillna(1).astype(int)
+    sdf["Mixer"]          = sdf["Mixer"].astype(str).str.strip()
+    sdf["Kode_Produk"]    = sdf["Kode_Produk"].astype(str).str.strip()
+    sdf["Kg_Mixing"]      = pd.to_numeric(sdf["Kg_Mixing"], errors="coerce").fillna(0)
 
-    # FIX: Pakai Job_ID sebagai row key — bukan (Mixer, Kode_Produk)
-    # sehingga produk duplikat (beda PO) tampil sebagai baris terpisah
-    sched_non_clean = schedule_df[~schedule_df["Cleaning"]].copy() \
-        if "Cleaning" in schedule_df.columns else schedule_df.copy()
+    # ── Kumpulkan kombinasi (mixer, kode_produk) unik ─────────────────────────
+    combos = (
+        sdf[["Mixer", "Kode_Produk", "Nama_Produk", "Kode_MC_Liquid",
+             "Grup_Cleaning", "Resting_Days", "Tanggal_Filling", "Shift_Filling"]]
+        .drop_duplicates(subset=["Mixer", "Kode_Produk"])
+        .copy()
+    )
+    combos["_mixer_order"] = combos["Mixer"].apply(
+        lambda m: mixer_order.index(m) if m in mixer_order else 999
+    )
+    combos = combos.sort_values(["_mixer_order", "Kode_Produk"]).drop(columns=["_mixer_order"])
 
-    # Unik per Job_ID — ambil atribut dari baris pertama tiap job
-    job_rows = sched_non_clean.groupby("Job_ID", sort=False).first().reset_index()
-
-    # Urutkan: per mixer (sesuai master), lalu per Kode_Produk
-    mixer_order_map = {m: i for i, m in enumerate(mixer_order)}
-    job_rows["_mixer_order"] = job_rows["Mixer"].map(mixer_order_map).fillna(999)
-    job_rows = job_rows.sort_values(["_mixer_order", "Kode_Produk"]).reset_index(drop=True)
-
-    # rows: list of (mixer, kode, nama, job_id)
-    rows = []
-    for _, r in job_rows.iterrows():
-        rows.append((r["Mixer"], r["Kode_Produk"], r["Produk"], int(r["Job_ID"])))
-
-    # ── Fill pivot data ───────────────────────────────────────
-    pivot_data     = {}   # job_id -> {(date, shift): kg}
-    cleaning_cells = set()
+    cleaning_cells = set()   # (mixer, kode, date_str, shift)
     resting_cells  = set()
 
-    for _, row in schedule_df.iterrows():
-        mx       = row["Mixer"]
-        date     = row["Tanggal"]
-        shift    = int(row["Shift"])
-        cleaning = row.get("Cleaning", False)
+    rows = []
+    for _, combo in combos.iterrows():
+        mixer      = combo["Mixer"]
+        kode       = combo["Kode_Produk"]
+        nama       = combo["Nama_Produk"]
+        kode_mc    = combo.get("Kode_MC_Liquid", "")
+        grup       = combo["Grup_Cleaning"]
+        rest_days  = int(float(combo.get("Resting_Days", 0)))
+        fill_date  = pd.to_datetime(combo["Tanggal_Filling"])
 
-        if cleaning:
-            # Cleaning: tandai semua job di mixer ini
-            for r_mixer, r_kode, r_nama, r_jid in rows:
-                if r_mixer == mx:
-                    cleaning_cells.add((r_jid, date, shift))
-            continue
-
-        jid          = int(row["Job_ID"])
-        kg           = float(row["Total_kg"]) if row["Total_kg"] else 0
-        resting_days = int(row.get("Resting_Days", 0))
-
-        if jid not in pivot_data:
-            pivot_data[jid] = {}
-        pivot_data[jid][(date, shift)] = pivot_data[jid].get((date, shift), 0) + kg
-
-        if resting_days > 0:
-            mix_dt = datetime.strptime(date, "%Y-%m-%d")
-            for rd in range(1, resting_days + 1):
-                rest_dt  = mix_dt + timedelta(days=rd)
-                rest_str = rest_dt.strftime("%Y-%m-%d")
-                for rs in [1, 2, 3]:
-                    resting_cells.add((jid, rest_str, rs))
-
-    # ── Build dataframe ───────────────────────────────────────
-    records = []
-    for row_mixer, kode, nama, jid in rows:
-        rec = {
-            "Job_ID":      jid,
-            "Mixer":       row_mixer,
-            "Kode_Produk": kode,
-            "Nama_Produk": nama
+        row_data = {
+            "Mixer":          mixer,
+            "Kode_Produk":    kode,
+            "Kode_MC_Liquid": kode_mc,
+            "Nama_Produk":    nama,
+            "Grup_Cleaning":  grup,
         }
-        for (d, s), label in zip(col_keys, col_labels):
-            val = pivot_data.get(jid, {}).get((d, s), "")
-            rec[label] = val if val != 0 else ""
-        records.append(rec)
 
-    pivot_df = pd.DataFrame(records)
+        mask = (sdf["Mixer"] == mixer) & (sdf["Kode_Produk"] == kode)
+        sub  = sdf[mask]
 
-    return pivot_df, {
+        for (d_str, s) in col_keys:
+            cell_mask = (sub["Tanggal_Mixing"] == d_str) & (sub["Shift_Mixing"] == s)
+            cell_data = sub[cell_mask]
+
+            if not cell_data.empty:
+                kg_val         = cell_data["Kg_Mixing"].sum()
+                cleaning_flag  = bool(cell_data["Cleaning"].any())
+                if cleaning_flag:
+                    row_data[(d_str, s)] = f"🔵 {round(kg_val, 1)} kg"
+                    cleaning_cells.add((mixer, kode, d_str, s))
+                else:
+                    row_data[(d_str, s)] = f"{round(kg_val, 1)} kg"
+            else:
+                # Cek resting period
+                d_dt       = datetime.strptime(d_str, "%Y-%m-%d")
+                in_resting = False
+                if rest_days > 0 and not sub.empty:
+                    last_mix   = pd.to_datetime(sub["Tanggal_Mixing"]).max()
+                    rest_start = last_mix + timedelta(days=1)
+                    if rest_start <= d_dt <= fill_date:
+                        in_resting = True
+                if in_resting:
+                    row_data[(d_str, s)] = "💤 Resting"
+                    resting_cells.add((mixer, kode, d_str, s))
+                else:
+                    row_data[(d_str, s)] = ""
+
+        rows.append(row_data)
+
+    # ── Build DataFrame ───────────────────────────────────────────────────────
+    rename_map = {ck: cl for ck, cl in zip(col_keys, col_labels)}
+    pivot_df   = pd.DataFrame(rows).rename(columns=rename_map)
+
+    meta = {
         "col_keys":       col_keys,
         "col_labels":     col_labels,
         "cleaning_cells": cleaning_cells,
         "resting_cells":  resting_cells,
-        "rows":           rows   # now (mixer, kode, nama, job_id)
+        "date_range":     date_range,
     }
+    return pivot_df, meta
 
 
-def build_filling_pivot(filling_plan, master_produk):
-    if filling_plan.empty:
-        return pd.DataFrame(), {}
+# ─── Export ke Excel ──────────────────────────────────────────────────────────
 
-    all_dates = sorted(filling_plan["Tanggal_Filling"].unique())
-
-    col_keys   = []
-    col_labels = []
-    for d in all_dates:
-        day_name = date_to_day(d)
-        dt       = datetime.strptime(str(d), "%Y-%m-%d")
-        date_lbl = dt.strftime("%d %b")
-        for s in [1, 2, 3]:
-            col_keys.append((d, s))
-            col_labels.append(f"{day_name} {date_lbl} S{s}")
-
-    mp_kodes   = list(master_produk["Kode_Produk"].astype(str).str.strip())
-    plan_kodes = list(filling_plan["Kode_Produk"].astype(str).str.strip().unique())
-    ordered_kodes  = [k for k in mp_kodes if k in plan_kodes]
-    ordered_kodes += [k for k in plan_kodes if k not in ordered_kodes]
-
-    cs_lookup = {}
-    for _, row in filling_plan.iterrows():
-        kode  = str(row["Kode_Produk"]).strip()
-        date  = str(row["Tanggal_Filling"])
-        shift = int(row["Shift_Filling"])
-        cs    = float(row["Target_CS"])
-        key   = (kode, date, shift)
-        cs_lookup[key] = cs_lookup.get(key, 0) + cs
-
-    nama_lookup = {}
-    for _, row in master_produk.iterrows():
-        kode = str(row["Kode_Produk"]).strip()
-        nama_lookup[kode] = row["Nama_Produk"]
-    for _, row in filling_plan.iterrows():
-        kode = str(row["Kode_Produk"]).strip()
-        if kode not in nama_lookup:
-            nama_lookup[kode] = row.get("Nama_Produk", kode)
-
-    urgent_lookup = {}
-    for _, row in filling_plan.iterrows():
-        kode = str(row["Kode_Produk"]).strip()
-        if row.get("Urgent", "") == "Urgent":
-            urgent_lookup[kode] = True
-
-    records = []
-    for kode in ordered_kodes:
-        nama   = nama_lookup.get(kode, kode)
-        urgent = "✓" if urgent_lookup.get(kode, False) else ""
-        rec    = {"Urgent": urgent, "Kode_Produk": kode, "Nama_Produk": nama}
-        total  = 0
-        for (d, s), label in zip(col_keys, col_labels):
-            val = cs_lookup.get((kode, d, s), "")
-            rec[label] = val if val != 0 else ""
-            if val != "":
-                total += val
-        rec["Total_CS"] = total
-        records.append(rec)
-
-    return pd.DataFrame(records), {"col_keys": col_keys, "col_labels": col_labels}
-
-
-def _write_mixing_sheet(ws, pivot_df, meta, master_mixer):
-    col_keys       = meta["col_keys"]
-    cleaning       = meta["cleaning_cells"]
-    resting        = meta["resting_cells"]
-    rows           = meta["rows"]   # (mixer, kode, nama, job_id)
-    DATA_START_COL = 4
-
-    hdr_fill    = PatternFill("solid", fgColor="1F4E79")
-    hdr_font    = Font(bold=True, color="FFFFFF")
-    subhdr_fill = PatternFill("solid", fgColor="2E75B6")
-    subhdr_font = Font(bold=True, color="FFFFFF")
-    clean_fill  = PatternFill("solid", fgColor="BDD7EE")
-    rest_fill   = PatternFill("solid", fgColor="FFE699")
-    mixer_fill  = PatternFill("solid", fgColor="D9E1F2")
-    alt_fill    = PatternFill("solid", fgColor="EBF1DE")
-    empty_fill  = PatternFill("solid", fgColor="FFFFFF")
-    center      = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin        = Side(style="thin", color="BFBFBF")
-    border      = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    for col, label in [(1, "Mixer"), (2, "Kode\nProduk"), (3, "Nama Produk")]:
-        cell           = ws.cell(row=1, column=col, value=label)
-        cell.fill      = hdr_fill
-        cell.font      = hdr_font
-        cell.alignment = center
-        ws.merge_cells(start_row=1, end_row=2, start_column=col, end_column=col)
-
-    date_groups = {}
-    for i, (d, s) in enumerate(col_keys):
-        date_groups.setdefault(d, []).append(DATA_START_COL + i)
-
-    for d, cols in date_groups.items():
-        day_name  = date_to_day(d)
-        dt_lbl    = datetime.strptime(d, "%Y-%m-%d").strftime("%d %b")
-        start_col = cols[0]
-        end_col   = cols[-1]
-        cell      = ws.cell(row=1, column=start_col, value=f"{day_name}, {dt_lbl}")
-        cell.fill      = subhdr_fill
-        cell.font      = subhdr_font
-        cell.alignment = center
-        if end_col > start_col:
-            ws.merge_cells(start_row=1, end_row=1,
-                           start_column=start_col, end_column=end_col)
-
-    for i, (d, s) in enumerate(col_keys):
-        col        = DATA_START_COL + i
-        cell       = ws.cell(row=2, column=col, value=f"Shift {s}")
-        cell.fill  = subhdr_fill
-        cell.font  = subhdr_font
-        cell.alignment = center
-
-    mixer_list = list(master_mixer["Mixer"])
-    cur_row    = 3
-
-    for mixer in mixer_list:
-        mixer_rows = [(m, k, n, jid) for m, k, n, jid in rows if m == mixer]
-        if not mixer_rows:
-            continue
-        mixer_start = cur_row
-
-        for ri, (m, kode, nama, jid) in enumerate(mixer_rows):
-            ws.cell(row=cur_row, column=1, value=mixer if ri == 0 else "")
-            ws.cell(row=cur_row, column=2, value=kode).alignment = center
-            ws.cell(row=cur_row, column=3, value=nama).alignment = center
-
-            row_bg = alt_fill if ri % 2 == 0 else empty_fill
-
-            for i, (d, s) in enumerate(col_keys):
-                col  = DATA_START_COL + i
-                cell = ws.cell(row=cur_row, column=col)
-                cell.alignment = center
-                cell.border    = border
-
-                if (jid, d, s) in cleaning:
-                    cell.fill  = clean_fill
-                    cell.value = ""
-                elif (jid, d, s) in resting:
-                    cell.fill  = rest_fill
-                    cell.value = ""
-                else:
-                    day_name = date_to_day(d)
-                    dt_lbl   = datetime.strptime(d, "%Y-%m-%d").strftime("%d %b")
-                    label    = f"{day_name} {dt_lbl} S{s}"
-                    if label in pivot_df.columns:
-                        val_series = pivot_df.loc[pivot_df["Job_ID"] == jid, label]
-                        v = val_series.values[0] if len(val_series) > 0 else ""
-                    else:
-                        v = ""
-                    cell.value = v if v != "" else ""
-                    cell.fill  = row_bg
-
-            cur_row += 1
-
-        if cur_row - 1 > mixer_start:
-            ws.merge_cells(start_row=mixer_start, end_row=cur_row - 1,
-                           start_column=1, end_column=1)
-        cell_mixer           = ws.cell(row=mixer_start, column=1)
-        cell_mixer.fill      = mixer_fill
-        cell_mixer.font      = Font(bold=True)
-        cell_mixer.alignment = center
-
-    cur_row += 1
-    ws.cell(row=cur_row, column=1, value="Keterangan:").font = Font(bold=True)
-    legends = [
-        (clean_fill, "Cleaning (ganti grup produk)"),
-        (rest_fill,  "Resting period (di gudang, mixer bebas dipakai)")
-    ]
-    for i, (fill, label) in enumerate(legends):
-        col  = 2 + i * 2
-        cell = ws.cell(row=cur_row, column=col)
-        cell.fill   = fill
-        cell.border = border
-        ws.cell(row=cur_row, column=col + 1, value=label)
-
-    ws.column_dimensions["A"].width = 12
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 22
-    for i in range(len(col_keys)):
-        ws.column_dimensions[get_column_letter(DATA_START_COL + i)].width = 10
-    ws.row_dimensions[1].height = 22
-    ws.row_dimensions[2].height = 22
-
-
-def _write_filling_sheet(ws, filling_pivot_df, meta):
-    if filling_pivot_df.empty:
-        ws.cell(row=1, column=1, value="Tidak ada data filling.")
-        return
-
-    col_keys       = meta["col_keys"]
-    col_labels     = meta["col_labels"]
-    DATA_START_COL = 4
-
-    hdr_fill    = PatternFill("solid", fgColor="1F4E79")
-    hdr_font    = Font(bold=True, color="FFFFFF")
-    subhdr_fill = PatternFill("solid", fgColor="375623")
-    subhdr_font = Font(bold=True, color="FFFFFF")
-    urgent_fill = PatternFill("solid", fgColor="FCE4D6")
-    alt_fill    = PatternFill("solid", fgColor="EBF1DE")
-    empty_fill  = PatternFill("solid", fgColor="FFFFFF")
-    total_fill  = PatternFill("solid", fgColor="D9E1F2")
-    center      = Alignment(horizontal="center", vertical="center", wrap_text=True)
-    thin        = Side(style="thin", color="BFBFBF")
-    border      = Border(left=thin, right=thin, top=thin, bottom=thin)
-
-    for col, label in [(1, "Urgent"), (2, "Kode\nProduk"), (3, "Nama Produk")]:
-        cell           = ws.cell(row=1, column=col, value=label)
-        cell.fill      = hdr_fill
-        cell.font      = hdr_font
-        cell.alignment = center
-        ws.merge_cells(start_row=1, end_row=2, start_column=col, end_column=col)
-
-    date_groups = {}
-    for i, (d, s) in enumerate(col_keys):
-        date_groups.setdefault(d, []).append(DATA_START_COL + i)
-
-    for d, cols in date_groups.items():
-        day_name  = date_to_day(d)
-        dt_lbl    = datetime.strptime(d, "%Y-%m-%d").strftime("%d %b")
-        start_col = cols[0]
-        end_col   = cols[-1]
-        cell      = ws.cell(row=1, column=start_col, value=f"{day_name}, {dt_lbl}")
-        cell.fill      = subhdr_fill
-        cell.font      = subhdr_font
-        cell.alignment = center
-        if end_col > start_col:
-            ws.merge_cells(start_row=1, end_row=1,
-                           start_column=start_col, end_column=end_col)
-
-    total_col = DATA_START_COL + len(col_keys)
-    cell      = ws.cell(row=1, column=total_col, value="Total CS")
-    cell.fill      = hdr_fill
-    cell.font      = hdr_font
-    cell.alignment = center
-    ws.merge_cells(start_row=1, end_row=2,
-                   start_column=total_col, end_column=total_col)
-
-    for i, (d, s) in enumerate(col_keys):
-        col        = DATA_START_COL + i
-        cell       = ws.cell(row=2, column=col, value=f"Shift {s}")
-        cell.fill  = subhdr_fill
-        cell.font  = subhdr_font
-        cell.alignment = center
-
-    for ri, (_, row) in enumerate(filling_pivot_df.iterrows()):
-        cur_row   = ri + 3
-        is_urgent = row["Urgent"] == "✓"
-        row_bg    = urgent_fill if is_urgent else (alt_fill if ri % 2 == 0 else empty_fill)
-
-        for col, val in [(1, row["Urgent"]), (2, row["Kode_Produk"]), (3, row["Nama_Produk"])]:
-            cell           = ws.cell(row=cur_row, column=col, value=val)
-            cell.alignment = center if col != 3 else Alignment(vertical="center")
-            cell.fill      = row_bg
-            cell.border    = border
-
-        for i, label in enumerate(col_labels):
-            col  = DATA_START_COL + i
-            val  = row.get(label, "")
-            cell = ws.cell(row=cur_row, column=col, value=val if val != "" else None)
-            cell.alignment    = center
-            cell.border       = border
-            cell.fill         = row_bg
-            if val != "" and val is not None:
-                cell.number_format = "0.##"
-
-        cell           = ws.cell(row=cur_row, column=total_col, value=row["Total_CS"])
-        cell.alignment = center
-        cell.fill      = total_fill
-        cell.font      = Font(bold=True)
-        cell.border    = border
-        cell.number_format = "0.##"
-
-    grand_row = len(filling_pivot_df) + 3
-    ws.cell(row=grand_row, column=3, value="TOTAL").font = Font(bold=True)
-    ws.cell(row=grand_row, column=3).fill = total_fill
-
-    for i, label in enumerate(col_labels):
-        col   = DATA_START_COL + i
-        total = sum(
-            float(r) for r in filling_pivot_df[label]
-            if r != "" and r is not None and str(r).strip() != ""
-        )
-        cell = ws.cell(row=grand_row, column=col,
-                       value=total if total > 0 else None)
-        cell.alignment    = center
-        cell.fill         = total_fill
-        cell.font         = Font(bold=True)
-        cell.border       = border
-        cell.number_format = "0.##"
-
-    grand_total = filling_pivot_df["Total_CS"].sum()
-    cell = ws.cell(row=grand_row, column=total_col, value=grand_total)
-    cell.alignment    = center
-    cell.fill         = total_fill
-    cell.font         = Font(bold=True)
-    cell.border       = border
-    cell.number_format = "0.##"
-
-    ws.cell(row=grand_row + 2, column=1, value="Keterangan:").font = Font(bold=True)
-    leg_cell = ws.cell(row=grand_row + 2, column=2)
-    leg_cell.fill   = urgent_fill
-    leg_cell.border = border
-    ws.cell(row=grand_row + 2, column=3, value="Produk Urgent")
-
-    ws.column_dimensions["A"].width = 8
-    ws.column_dimensions["B"].width = 12
-    ws.column_dimensions["C"].width = 22
-    for i in range(len(col_keys)):
-        ws.column_dimensions[get_column_letter(DATA_START_COL + i)].width = 10
-    ws.column_dimensions[get_column_letter(total_col)].width = 10
-    ws.row_dimensions[1].height = 22
-    ws.row_dimensions[2].height = 22
-
-
-def pivot_to_excel(pivot_df, meta, master_mixer, filling_plan=None, master_produk=None):
+def pivot_to_excel(pivot_df, meta, master_mixer_df):
+    """Export pivot ke Excel dengan formatting lengkap."""
     wb = Workbook()
+    ws = wb.active
+    ws.title = "Jadwal Mixing"
 
-    ws_mix       = wb.active
-    ws_mix.title = "Jadwal Mixing"
-    if not pivot_df.empty:
-        _write_mixing_sheet(ws_mix, pivot_df, meta, master_mixer)
-    else:
-        ws_mix.cell(row=1, column=1, value="Tidak ada jadwal mixing.")
+    mixer_df = master_mixer_df.copy()
+    mixer_df["Mixer"] = mixer_df["Mixer"].astype(str).str.strip()
 
-    ws_fill       = wb.create_sheet("Jadwal Filling")
-    if filling_plan is not None and not filling_plan.empty:
-        mp = master_produk if master_produk is not None else pd.DataFrame()
-        filling_pivot_df, filling_meta = build_filling_pivot(filling_plan, mp)
-        _write_filling_sheet(ws_fill, filling_pivot_df, filling_meta)
-    else:
-        ws_fill.cell(row=1, column=1, value="Tidak ada data filling.")
+    col_keys        = meta["col_keys"]
+    date_range      = meta["date_range"]
+    cleaning_cells  = meta["cleaning_cells"]
+    resting_cells   = meta["resting_cells"]
+
+    FIXED_COLS = ["Mixer", "Kode_Produk", "Kode_MC_Liquid", "Nama_Produk", "Grup_Cleaning"]
+    n_fixed    = len(FIXED_COLS)
+
+    # ── Row 1: kolom tetap (merge 2 baris) + header tanggal (merge 3 kolom) ───
+    for ci, h in enumerate(FIXED_COLS, 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.fill      = FILL_HEADER_DARK
+        c.font      = FONT_WHITE_BOLD
+        c.alignment = ALIGN_CENTER
+        ws.merge_cells(start_row=1, start_column=ci, end_row=2, end_column=ci)
+
+    col_cursor = n_fixed + 1
+    for d_str in date_range:
+        d     = datetime.strptime(d_str, "%Y-%m-%d")
+        label = f"{DAYS_ID[d.weekday()]} {d.strftime('%d/%m/%Y')}"
+        c = ws.cell(row=1, column=col_cursor, value=label)
+        c.fill      = FILL_HEADER_DARK
+        c.font      = FONT_WHITE_BOLD
+        c.alignment = ALIGN_CENTER
+        ws.merge_cells(
+            start_row=1, start_column=col_cursor,
+            end_row=1,   end_column=col_cursor + 2
+        )
+        col_cursor += 3
+
+    # ── Row 2: shift header ───────────────────────────────────────────────────
+    for ci, (d_str, s) in enumerate(col_keys):
+        c = ws.cell(row=2, column=n_fixed + 1 + ci, value=f"S{s}")
+        c.fill      = FILL_HEADER_LIGHT
+        c.font      = FONT_BOLD
+        c.alignment = ALIGN_CENTER
+
+    # ── Data rows ─────────────────────────────────────────────────────────────
+    for ri, (_, row) in enumerate(pivot_df.iterrows(), 3):
+        mixer = str(row.get("Mixer", ""))
+        kode  = str(row.get("Kode_Produk", ""))
+
+        for ci, col in enumerate(FIXED_COLS, 1):
+            c = ws.cell(row=ri, column=ci, value=row.get(col, ""))
+            c.alignment = ALIGN_LEFT
+            c.border    = THIN_BORDER
+
+        for ci, (col_label, (d_str, s)) in enumerate(
+            zip(meta["col_labels"], col_keys), n_fixed + 1
+        ):
+            val = row.get(col_label, "")
+            c   = ws.cell(row=ri, column=ci, value=val)
+            c.alignment = ALIGN_CENTER
+            c.border    = THIN_BORDER
+
+            if (mixer, kode, d_str, s) in cleaning_cells:
+                c.fill = FILL_CLEANING
+            elif (mixer, kode, d_str, s) in resting_cells:
+                c.fill = FILL_RESTING
+            elif val and val != "":
+                c.fill = FILL_MIXING
+
+    # ── Column widths ─────────────────────────────────────────────────────────
+    ws.column_dimensions["A"].width = 10   # Mixer
+    ws.column_dimensions["B"].width = 14   # Kode_Produk
+    ws.column_dimensions["C"].width = 14   # Kode_MC_Liquid
+    ws.column_dimensions["D"].width = 30   # Nama_Produk
+    ws.column_dimensions["E"].width = 12   # Grup_Cleaning
+    for ci in range(n_fixed + 1, n_fixed + len(col_keys) + 1):
+        ws.column_dimensions[get_column_letter(ci)].width = 11
+
+    ws.row_dimensions[1].height = 25
+    ws.row_dimensions[2].height = 20
+    ws.freeze_panes = "F3"
+
+    # ── Sheet Keterangan ──────────────────────────────────────────────────────
+    ws2 = wb.create_sheet("Keterangan")
+    legends = [
+        ("Warna",           "Arti"),
+        ("Hijau muda",      "Ada jadwal mixing (kg)"),
+        ("Biru muda (🔵)", "Ada cleaning sebelum mixing di slot ini"),
+        ("Kuning (💤)",    "Periode resting (menunggu filling)"),
+        ("Kosong",          "Tidak ada aktivitas"),
+    ]
+    for ri, (a, b) in enumerate(legends, 1):
+        ws2.cell(row=ri, column=1, value=a).font = FONT_BOLD
+        ws2.cell(row=ri, column=2, value=b)
+    ws2.column_dimensions["A"].width = 22
+    ws2.column_dimensions["B"].width = 40
 
     buf = io.BytesIO()
     wb.save(buf)
