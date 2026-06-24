@@ -21,6 +21,40 @@ for key in ["master_mixer", "master_produk", "filling_plan", "schedule_result"]:
 with st.sidebar:
     st.header("📂 Upload Data")
 
+    # ── Download Template ─────────────────────────────────────────────────
+    with st.expander("📥 Download Template", expanded=False):
+        from template_generator import (
+            generate_template_master_mixer,
+            generate_template_master_produk,
+            generate_template_filling_plan,
+        )
+        st.caption("Download template Excel, isi datamu, lalu upload di bawah.")
+
+        st.download_button(
+            label="⬇️ Template Master Mixer",
+            data=generate_template_master_mixer(),
+            file_name="template_master_mixer.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        st.download_button(
+            label="⬇️ Template Master Produk",
+            data=generate_template_master_produk(),
+            file_name="template_master_produk.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+        st.download_button(
+            label="⬇️ Template Filling Plan",
+            data=generate_template_filling_plan(),
+            file_name="template_filling_plan.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            use_container_width=True,
+        )
+
+    st.divider()
+
+    # ... sisa kode upload seperti biasa
     st.subheader("1. Master Mixer")
     f_mixer = st.file_uploader("Upload Master Mixer (.xlsx)", type=["xlsx"], key="up_mixer")
     if f_mixer:
