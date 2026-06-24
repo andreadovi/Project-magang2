@@ -1,249 +1,194 @@
-# pivot.py
-import io
+# app.py
+import streamlit as st
 import pandas as pd
-from openpyxl import Workbook
-from openpyxl.styles import PatternFill, Font, Alignment, Border, Side
-from openpyxl.utils import get_column_letter
-from datetime import datetime, timedelta
+import io
 
-DAYS_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+from scheduler import generate_mixing_schedule
+from pivot import build_pivot, pivot_to_excel
 
-FILL_HEADER_DARK  = PatternFill("solid", fgColor="1F4E79")
-FILL_HEADER_LIGHT = PatternFill("solid", fgColor="BDD7EE")
-FILL_CLEANING     = PatternFill("solid", fgColor="BDD7EE")
-FILL_RESTING      = PatternFill("solid", fgColor="FFE699")
-FILL_MIXING       = PatternFill("solid", fgColor="E2EFDA")
-FONT_WHITE_BOLD   = Font(bold=True, color="FFFFFF")
-FONT_BOLD         = Font(bold=True)
-ALIGN_CENTER      = Alignment(horizontal="center", vertical="center", wrap_text=True)
-ALIGN_LEFT        = Alignment(horizontal="left",   vertical="center", wrap_text=True)
-THIN_BORDER = Border(
-    left=Side(style="thin"), right=Side(style="thin"),
-    top=Side(style="thin"),  bottom=Side(style="thin"),
-)
+# ─────────────────────────────────────────────────────────────────────────────
+st.set_page_config(page_title="Mixing Scheduler", layout="wide")
+st.title("🧪 Mixing Scheduler")
 
-REQUIRED_COLS = [
-    "Tanggal_Mixing", "Shift_Mixing", "Mixer",
-    "Kode_Produk", "Nama_Produk", "Kode_MC_Liquid",
-    "Grup_Cleaning", "Kg_Mixing", "Resting_Days",
-    "Tanggal_Filling", "Shift_Filling", "Cleaning",
-]
+# ─── Session state defaults ───────────────────────────────────────────────────
+for key in ["master_mixer", "master_produk", "filling_plan", "schedule_result"]:
+    if key not in st.session_state:
+        st.session_state[key] = None
 
+# ─────────────────────────────────────────────────────────────────────────────
+# SIDEBAR — Upload & Master Data
+# ─────────────────────────────────────────────────────────────────────────────
+with st.sidebar:
+    st.header("📂 Upload Data")
 
-def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
-    if schedule_df is None or schedule_df.empty:
-        return pd.DataFrame(), {}
-
-    missing = [c for c in REQUIRED_COLS if c not in schedule_df.columns]
-    if missing:
-        return pd.DataFrame(), {}
-
-    mixer_df = master_mixer_df.copy()
-    mixer_df["Mixer"] = mixer_df["Mixer"].astype(str).str.strip()
-    mixer_order = list(mixer_df["Mixer"])
-
-    # ── Bangun kolom ──────────────────────────────────────────────────────────
-    col_keys   = []
-    col_labels = []
-
-    for d_str in date_range:
-        d = datetime.strptime(d_str, "%Y-%m-%d")
-        day_lbl = f"{DAYS_ID[d.weekday()]}\n{d.strftime('%d/%m')}"
-        for s in [1, 2, 3]:
-            col_keys.append((d_str, s))
-            col_labels.append(f"{day_lbl}\nS{s}")
-
-    # ── Normalisasi schedule ──────────────────────────────────────────────────
-    sdf = schedule_df.copy()
-    sdf["Tanggal_Mixing"]  = sdf["Tanggal_Mixing"].astype(str).str.strip()
-    sdf["Shift_Mixing"]    = pd.to_numeric(sdf["Shift_Mixing"], errors="coerce").fillna(1).astype(int)
-    sdf["Mixer"]           = sdf["Mixer"].astype(str).str.strip()
-    sdf["Kode_Produk"]     = sdf["Kode_Produk"].astype(str).str.strip()
-    sdf["Kg_Mixing"]       = pd.to_numeric(sdf["Kg_Mixing"], errors="coerce").fillna(0)
-    sdf["Cleaning"]        = sdf["Cleaning"].fillna(False).astype(bool)
-    sdf["Resting_Days"]    = pd.to_numeric(sdf["Resting_Days"], errors="coerce").fillna(0)
-    sdf["Tanggal_Filling"] = sdf["Tanggal_Filling"].astype(str).str.strip()
-
-    # ── Kumpulkan kombinasi (mixer, kode) unik ────────────────────────────────
-    combos = (
-        sdf[[
-            "Mixer", "Kode_Produk", "Nama_Produk", "Kode_MC_Liquid",
-            "Grup_Cleaning", "Resting_Days", "Tanggal_Filling", "Shift_Filling"
-        ]]
-        .drop_duplicates(subset=["Mixer", "Kode_Produk"])
-        .copy()
-    )
-    combos["_mixer_order"] = combos["Mixer"].apply(
-        lambda m: mixer_order.index(m) if m in mixer_order else 999
-    )
-    combos = combos.sort_values(["_mixer_order", "Kode_Produk"]).drop(columns=["_mixer_order"])
-
-    cleaning_cells = set()
-    resting_cells  = set()
-    rows = []
-
-    for _, combo in combos.iterrows():
-        mixer     = combo["Mixer"]
-        kode      = combo["Kode_Produk"]
-        nama      = combo["Nama_Produk"]
-        kode_mc   = combo.get("Kode_MC_Liquid", "")
-        grup      = combo["Grup_Cleaning"]
-        rest_days = int(float(combo.get("Resting_Days", 0)))
-
+    st.subheader("1. Master Mixer")
+    f_mixer = st.file_uploader("Upload Master Mixer (.xlsx)", type=["xlsx"], key="up_mixer")
+    if f_mixer:
         try:
-            fill_date = pd.to_datetime(combo["Tanggal_Filling"])
-        except Exception:
-            fill_date = None
+            df = pd.read_excel(f_mixer)
+            st.session_state.master_mixer = df
+            st.success(f"✅ {len(df)} mixer dimuat.")
+        except Exception as e:
+            st.error(f"Gagal baca file: {e}")
 
-        row_data = {
-            "Mixer":          mixer,
-            "Kode_Produk":    kode,
-            "Kode_MC_Liquid": kode_mc,
-            "Nama_Produk":    nama,
-            "Grup_Cleaning":  grup,
-        }
+    st.subheader("2. Master Produk")
+    f_produk = st.file_uploader("Upload Master Produk (.xlsx)", type=["xlsx"], key="up_produk")
+    if f_produk:
+        try:
+            df = pd.read_excel(f_produk)
+            st.session_state.master_produk = df
+            st.success(f"✅ {len(df)} produk dimuat.")
+        except Exception as e:
+            st.error(f"Gagal baca file: {e}")
 
-        mask = (sdf["Mixer"] == mixer) & (sdf["Kode_Produk"] == kode)
-        sub  = sdf[mask]
+    st.subheader("3. Filling Plan")
+    f_filling = st.file_uploader("Upload Filling Plan (.xlsx)", type=["xlsx"], key="up_filling")
+    if f_filling:
+        try:
+            df = pd.read_excel(f_filling)
+            st.session_state.filling_plan = df
+            st.success(f"✅ {len(df)} item filling dimuat.")
+        except Exception as e:
+            st.error(f"Gagal baca file: {e}")
 
-        for (d_str, s) in col_keys:
-            cell_mask = (sub["Tanggal_Mixing"] == d_str) & (sub["Shift_Mixing"] == s)
-            cell_data = sub[cell_mask]
+    st.divider()
 
-            if not cell_data.empty:
-                kg_val        = cell_data["Kg_Mixing"].sum()
-                cleaning_flag = bool(cell_data["Cleaning"].any())
-                if cleaning_flag:
-                    row_data[(d_str, s)] = f"🔵 {round(kg_val, 1)} kg"
-                    cleaning_cells.add((mixer, kode, d_str, s))
-                else:
-                    row_data[(d_str, s)] = f"{round(kg_val, 1)} kg"
-            else:
-                in_resting = False
-                if rest_days > 0 and fill_date is not None and not sub.empty:
-                    try:
-                        d_dt       = datetime.strptime(d_str, "%Y-%m-%d")
-                        last_mix   = pd.to_datetime(sub["Tanggal_Mixing"]).max()
-                        rest_start = last_mix + timedelta(days=1)
-                        if rest_start <= d_dt <= fill_date:
-                            in_resting = True
-                    except Exception:
-                        pass
+    ready = all([
+        st.session_state.master_mixer is not None,
+        st.session_state.master_produk is not None,
+        st.session_state.filling_plan is not None,
+    ])
 
-                if in_resting:
-                    row_data[(d_str, s)] = "💤 Resting"
-                    resting_cells.add((mixer, kode, d_str, s))
-                else:
-                    row_data[(d_str, s)] = ""
+    if st.button("⚡ Generate Jadwal Mixing", disabled=not ready, use_container_width=True):
+        st.session_state.schedule_result = None
+        with st.spinner("Menjadwalkan mixing..."):
+            try:
+                result = generate_mixing_schedule(
+                    st.session_state.master_mixer,
+                    st.session_state.master_produk,
+                    st.session_state.filling_plan,
+                )
+                st.session_state.schedule_result = result
+                st.success("✅ Jadwal berhasil dibuat!")
+            except Exception as e:
+                st.error(f"Error saat generate: {e}")
+                st.exception(e)
 
-        rows.append(row_data)
+    if not ready:
+        st.info("Upload ketiga file untuk mengaktifkan Generate.")
 
-    if not rows:
-        return pd.DataFrame(), {}
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN — Tampilkan Hasil
+# ─────────────────────────────────────────────────────────────────────────────
+if st.session_state.schedule_result is None:
+    st.info("👈 Upload data dan klik **Generate Jadwal Mixing** untuk memulai.")
+    st.stop()
 
-    rename_map = {ck: cl for ck, cl in zip(col_keys, col_labels)}
-    pivot_df   = pd.DataFrame(rows).rename(columns=rename_map)
+result      = st.session_state.schedule_result
+schedule_df = result["schedule"]
+warnings    = result["warnings"]
+shifted     = result["shifted"]
+unscheduled = result["unscheduled"]
 
-    meta = {
-        "col_keys":       col_keys,
-        "col_labels":     col_labels,
-        "cleaning_cells": cleaning_cells,
-        "resting_cells":  resting_cells,
-        "date_range":     date_range,
-    }
-    return pivot_df, meta
+# ─── Ringkasan ────────────────────────────────────────────────────────────────
+col1, col2, col3, col4 = st.columns(4)
+col1.metric("Total Jadwal Mixing", len(schedule_df))
+col2.metric("Produk Unik", schedule_df["Kode_Produk"].nunique() if not schedule_df.empty else 0)
+col3.metric("Peringatan", len(warnings))
+col4.metric("Tidak Terjadwal", len(unscheduled))
 
+st.divider()
 
-def pivot_to_excel(pivot_df, meta, master_mixer_df):
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Jadwal Mixing"
+# ─── Warnings ────────────────────────────────────────────────────────────────
+if warnings:
+    with st.expander(f"⚠️ Peringatan ({len(warnings)})", expanded=True):
+        for w in warnings:
+            st.warning(w)
 
-    mixer_df = master_mixer_df.copy()
-    mixer_df["Mixer"] = mixer_df["Mixer"].astype(str).str.strip()
+if unscheduled:
+    with st.expander(f"❌ Tidak Terjadwal ({len(unscheduled)})", expanded=True):
+        for u in unscheduled:
+            st.error(u)
 
-    col_keys       = meta["col_keys"]
-    date_range     = meta["date_range"]
-    cleaning_cells = meta["cleaning_cells"]
-    resting_cells  = meta["resting_cells"]
+if shifted:
+    with st.expander(f"📅 Filling Digeser ({len(shifted)})", expanded=False):
+        st.dataframe(pd.DataFrame(shifted), use_container_width=True)
 
-    FIXED_COLS = ["Mixer", "Kode_Produk", "Kode_MC_Liquid", "Nama_Produk", "Grup_Cleaning"]
-    n_fixed    = len(FIXED_COLS)
+# ─── Tabel Jadwal Mentah ──────────────────────────────────────────────────────
+st.subheader("📋 Jadwal Mixing Detail")
+if schedule_df.empty:
+    st.warning("Tidak ada jadwal yang berhasil dibuat.")
+else:
+    st.dataframe(schedule_df, use_container_width=True, height=400)
 
-    # Row 1: header tetap (merge 2 baris) + header tanggal (merge 3 kolom)
-    for ci, h in enumerate(FIXED_COLS, 1):
-        c = ws.cell(row=1, column=ci, value=h)
-        c.fill      = FILL_HEADER_DARK
-        c.font      = FONT_WHITE_BOLD
-        c.alignment = ALIGN_CENTER
-        ws.merge_cells(start_row=1, start_column=ci, end_row=2, end_column=ci)
+    csv_buf = io.StringIO()
+    schedule_df.to_csv(csv_buf, index=False)
+    st.download_button(
+        label="⬇️ Download Jadwal (CSV)",
+        data=csv_buf.getvalue().encode("utf-8"),
+        file_name="jadwal_mixing.csv",
+        mime="text/csv",
+    )
 
-    col_cursor = n_fixed + 1
-    for d_str in date_range:
-        d     = datetime.strptime(d_str, "%Y-%m-%d")
-        label = f"{DAYS_ID[d.weekday()]} {d.strftime('%d/%m/%Y')}"
-        c = ws.cell(row=1, column=col_cursor, value=label)
-        c.fill      = FILL_HEADER_DARK
-        c.font      = FONT_WHITE_BOLD
-        c.alignment = ALIGN_CENTER
-        ws.merge_cells(
-            start_row=1, start_column=col_cursor,
-            end_row=1,   end_column=col_cursor + 2
-        )
-        col_cursor += 3
+st.divider()
 
-    # Row 2: shift header
-    for ci, (d_str, s) in enumerate(col_keys):
-        c = ws.cell(row=2, column=n_fixed + 1 + ci, value=f"S{s}")
-        c.fill      = FILL_HEADER_LIGHT
-        c.font      = FONT_BOLD
-        c.alignment = ALIGN_CENTER
+# ─── Pivot / Gantt View ───────────────────────────────────────────────────────
+st.subheader("📅 Pivot Jadwal Mixing")
 
-    # Data rows
-    for ri, (_, row) in enumerate(pivot_df.iterrows(), 3):
-        mixer = str(row.get("Mixer", ""))
-        kode  = str(row.get("Kode_Produk", ""))
+if schedule_df.empty:
+    st.info("Tidak ada data untuk ditampilkan sebagai pivot.")
+    st.stop()
 
-        for ci, col in enumerate(FIXED_COLS, 1):
-            c = ws.cell(row=ri, column=ci, value=row.get(col, ""))
-            c.alignment = ALIGN_LEFT
-            c.border    = THIN_BORDER
+# Hitung date_range dari hasil schedule
+try:
+    all_dates  = pd.to_datetime(schedule_df["Tanggal_Mixing"])
+    fill_dates = pd.to_datetime(schedule_df["Tanggal_Filling"])
+    date_min   = all_dates.min()
+    date_max   = max(all_dates.max(), fill_dates.max())
 
-        for ci, (col_label, (d_str, s)) in enumerate(
-            zip(meta["col_labels"], col_keys), n_fixed + 1
-        ):
-            val = row.get(col_label, "")
-            c   = ws.cell(row=ri, column=ci, value=val)
-            c.alignment = ALIGN_CENTER
-            c.border    = THIN_BORDER
+    date_range = (
+        pd.date_range(start=date_min, end=date_max)
+        .strftime("%Y-%m-%d")
+        .tolist()
+    )
+except Exception as e:
+    st.error(f"Gagal menghitung date_range: {e}")
+    date_range = []
 
-            if (mixer, kode, d_str, s) in cleaning_cells:
-                c.fill = FILL_CLEANING
-            elif (mixer, kode, d_str, s) in resting_cells:
-                c.fill = FILL_RESTING
-            elif val and val != "":
-                c.fill = FILL_MIXING
+if not date_range:
+    st.stop()
 
-    # Column widths
-    ws.column_dimensions["A"].width = 10
-    ws.column_dimensions["B"].width = 14
-    ws.column_dimensions["C"].width = 14
-    ws.column_dimensions["D"].width = 30
-    ws.column_dimensions["E"].width = 12
-    for ci in range(n_fixed + 1, n_fixed + len(col_keys) + 1):
-        ws.column_dimensions[get_column_letter(ci)].width = 11
+# Build pivot
+try:
+    pivot_df, meta = build_pivot(
+        schedule_df,
+        st.session_state.master_mixer,
+        st.session_state.master_produk,
+        date_range,
+    )
+except Exception as e:
+    st.error(f"Gagal membuat pivot: {e}")
+    st.exception(e)
+    st.stop()
 
-    ws.row_dimensions[1].height = 25
-    ws.row_dimensions[2].height = 20
-    ws.freeze_panes = "F3"
+if pivot_df.empty:
+    st.warning("Pivot kosong. Periksa data schedule.")
+    st.stop()
 
-    # Sheet Keterangan
-    ws2 = wb.create_sheet("Keterangan")
-    legends = [
-        ("Warna",          "Arti"),
-        ("Hijau muda",     "Ada jadwal mixing (kg)"),
-        ("Biru muda (🔵)", "Ada cleaning sebelum mixing di slot ini"),
-        ("Kuning (💤)",    "Periode resting (menunggu filling)"),
-        ("Kosong",         "Tidak ada aktivitas"),
-    ]
-    for ri, (a, b) in enumerate(legends, 
+st.dataframe(pivot_df, use_container_width=True, height=500)
+
+# Download Excel
+try:
+    excel_bytes = pivot_to_excel(pivot_df, meta, st.session_state.master_mixer)
+    st.download_button(
+        label="⬇️ Download Pivot (Excel)",
+        data=excel_bytes,
+        file_name="pivot_jadwal_mixing.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+except Exception as e:
+    st.error(f"Gagal export Excel: {e}")
+
+# ─── Footer ───────────────────────────────────────────────────────────────────
+st.divider()
+st.caption("Mixing Scheduler — dibuat dengan ❤️ menggunakan Streamlit")
