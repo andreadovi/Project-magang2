@@ -309,18 +309,26 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         return False if prev is None else prev != grup_produk
 
     def get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
-        deadline_dt = fill_date - timedelta(days=max(rest_days, 0))
-        fill_d_str  = fill_date.strftime("%Y-%m-%d")
-        all_slots   = []
-        for delta in range(window_days):
-            d     = deadline_dt - timedelta(days=delta)
-            d_str = d.strftime("%Y-%m-%d")
-            for shift in [3, 2, 1]:
-                if rest_days == 0 and d_str == fill_d_str and shift >= fill_shift:
-                    continue
-                all_slots.append((d_str, shift, delta, shift))
-        all_slots.sort(key=lambda x: (x[2], -x[3]))
-        return [(d_str, shift) for d_str, shift, _, _ in all_slots]
+    deadline_dt = fill_date - timedelta(days=max(rest_days, 0))
+    fill_d_str  = fill_date.strftime("%Y-%m-%d")
+    all_slots   = []
+    for delta in range(window_days):
+        d     = deadline_dt - timedelta(days=delta)
+        d_str = d.strftime("%Y-%m-%d")
+
+        # Minggu (weekday=6) diberi penalti prioritas tinggi
+        # → dipakai terakhir, hanya jika hari lain full
+        is_sunday = (d.weekday() == 6)
+        day_penalty = 100 if is_sunday else 0
+
+        for shift in [3, 2, 1]:
+            if rest_days == 0 and d_str == fill_d_str and shift >= fill_shift:
+                continue
+            all_slots.append((d_str, shift, delta, shift, day_penalty))
+
+    # Sort: utamakan non-Minggu (day_penalty=0), lalu terdekat deadline, lalu shift terbesar
+    all_slots.sort(key=lambda x: (x[4], x[2], -x[3]))
+    return [(d_str, shift) for d_str, shift, _, _, _ in all_slots]
 
     # Urutkan: Urgent dulu
     fp["_urgent_sort"] = fp["Urgent"].apply(lambda x: 0 if x == "Urgent" else 1)
