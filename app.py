@@ -146,19 +146,25 @@ with tab2:
             if valid_kodes:
                 produk_df_str = produk_df.copy()
                 produk_df_str["_kode_str"] = produk_df_str["Kode_Produk"].astype(str)
-                order_map   = {k: i for i, k in enumerate(valid_kodes)}
-                filtered_df = produk_df_str[produk_df_str["_kode_str"].isin(valid_kodes)].copy()
-                filtered_df["_order"] = filtered_df["_kode_str"].map(order_map)
-                filtered_df = filtered_df.sort_values("_order").drop(
-                    columns=["_order", "_kode_str"]).reset_index(drop=True)
-
+            
+                # FIX: Bangun baris dari input_kodes_str langsung — preserve duplikasi
+                # Setiap elemen di valid_kodes = 1 baris, meskipun kode sama
+                nama_map_local = produk_df_str.set_index("_kode_str")["Nama_Produk"].to_dict()
+            
+                rows_kode = []
+                rows_nama = []
+                for k in input_kodes_str:   # ← pakai input_kodes_str, bukan valid_kodes
+                    if k in [str(x) for x in all_kodes]:
+                        rows_kode.append(k)
+                        rows_nama.append(nama_map_local.get(k, k))
+            
                 init_data = {
-                    "Urgent":      [False] * len(filtered_df),
-                    "Kode_Produk": list(filtered_df["Kode_Produk"].astype(str)),
-                    "Nama_Produk": list(filtered_df["Nama_Produk"]),
+                    "Urgent":      [False] * len(rows_kode),
+                    "Kode_Produk": rows_kode,
+                    "Nama_Produk": rows_nama,
                 }
                 for col in shift_cols:
-                    init_data[col] = [None] * len(filtered_df)
+                    init_data[col] = [None] * len(rows_kode)
                 st.session_state[grid_key] = pd.DataFrame(init_data)
 
         if grid_key in st.session_state and not st.session_state[grid_key].empty:
