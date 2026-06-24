@@ -42,10 +42,8 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
     mixer_df["Mixer"] = mixer_df["Mixer"].astype(str).str.strip()
     mixer_order = list(mixer_df["Mixer"])
 
-    # ── Bangun kolom ──────────────────────────────────────────────────────────
     col_keys   = []
     col_labels = []
-
     for d_str in date_range:
         d = datetime.strptime(d_str, "%Y-%m-%d")
         day_lbl = f"{DAYS_ID[d.weekday()]}\n{d.strftime('%d/%m')}"
@@ -53,18 +51,16 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
             col_keys.append((d_str, s))
             col_labels.append(f"{day_lbl}\nS{s}")
 
-    # ── Normalisasi schedule ──────────────────────────────────────────────────
     sdf = schedule_df.copy()
     sdf["Tanggal_Mixing"]  = sdf["Tanggal_Mixing"].astype(str).str.strip()
-    sdf["Shift_Mixing"]    = pd.to_numeric(sdf["Shift_Mixing"], errors="coerce").fillna(1).astype(int)
+    sdf["Shift_Mixing"]    = pd.to_numeric(sdf["Shift_Mixing"],  errors="coerce").fillna(1).astype(int)
     sdf["Mixer"]           = sdf["Mixer"].astype(str).str.strip()
     sdf["Kode_Produk"]     = sdf["Kode_Produk"].astype(str).str.strip()
-    sdf["Kg_Mixing"]       = pd.to_numeric(sdf["Kg_Mixing"], errors="coerce").fillna(0)
+    sdf["Kg_Mixing"]       = pd.to_numeric(sdf["Kg_Mixing"],     errors="coerce").fillna(0)
     sdf["Cleaning"]        = sdf["Cleaning"].fillna(False).astype(bool)
-    sdf["Resting_Days"]    = pd.to_numeric(sdf["Resting_Days"], errors="coerce").fillna(0)
+    sdf["Resting_Days"]    = pd.to_numeric(sdf["Resting_Days"],  errors="coerce").fillna(0)
     sdf["Tanggal_Filling"] = sdf["Tanggal_Filling"].astype(str).str.strip()
 
-    # ── Kumpulkan kombinasi (mixer, kode) unik ────────────────────────────────
     combos = (
         sdf[[
             "Mixer", "Kode_Produk", "Nama_Produk", "Kode_MC_Liquid",
@@ -76,7 +72,9 @@ def build_pivot(schedule_df, master_mixer_df, master_produk_df, date_range):
     combos["_mixer_order"] = combos["Mixer"].apply(
         lambda m: mixer_order.index(m) if m in mixer_order else 999
     )
-    combos = combos.sort_values(["_mixer_order", "Kode_Produk"]).drop(columns=["_mixer_order"])
+    combos = combos.sort_values(
+        ["_mixer_order", "Kode_Produk"]
+    ).drop(columns=["_mixer_order"])
 
     cleaning_cells = set()
     resting_cells  = set()
@@ -159,9 +157,6 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
     ws = wb.active
     ws.title = "Jadwal Mixing"
 
-    mixer_df = master_mixer_df.copy()
-    mixer_df["Mixer"] = mixer_df["Mixer"].astype(str).str.strip()
-
     col_keys       = meta["col_keys"]
     date_range     = meta["date_range"]
     cleaning_cells = meta["cleaning_cells"]
@@ -170,7 +165,6 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
     FIXED_COLS = ["Mixer", "Kode_Produk", "Kode_MC_Liquid", "Nama_Produk", "Grup_Cleaning"]
     n_fixed    = len(FIXED_COLS)
 
-    # Row 1: header tetap (merge 2 baris) + header tanggal (merge 3 kolom)
     for ci, h in enumerate(FIXED_COLS, 1):
         c = ws.cell(row=1, column=ci, value=h)
         c.fill      = FILL_HEADER_DARK
@@ -192,14 +186,12 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
         )
         col_cursor += 3
 
-    # Row 2: shift header
     for ci, (d_str, s) in enumerate(col_keys):
         c = ws.cell(row=2, column=n_fixed + 1 + ci, value=f"S{s}")
         c.fill      = FILL_HEADER_LIGHT
         c.font      = FONT_BOLD
         c.alignment = ALIGN_CENTER
 
-    # Data rows
     for ri, (_, row) in enumerate(pivot_df.iterrows(), 3):
         mixer = str(row.get("Mixer", ""))
         kode  = str(row.get("Kode_Produk", ""))
@@ -224,7 +216,6 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
             elif val and val != "":
                 c.fill = FILL_MIXING
 
-    # Column widths
     ws.column_dimensions["A"].width = 10
     ws.column_dimensions["B"].width = 14
     ws.column_dimensions["C"].width = 14
@@ -237,7 +228,6 @@ def pivot_to_excel(pivot_df, meta, master_mixer_df):
     ws.row_dimensions[2].height = 20
     ws.freeze_panes = "F3"
 
-    # Sheet Keterangan
     ws2 = wb.create_sheet("Keterangan")
     legends = [
         ("Warna",          "Arti"),
