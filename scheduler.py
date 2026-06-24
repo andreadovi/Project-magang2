@@ -76,26 +76,19 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         return False if prev is None else prev != grup_produk
 
     def get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
-        """
-        Kembalikan list (date_str, shift) dalam window_days hari sebelum deadline.
-        Deadline = fill_date - rest_days.
-        Prioritas: slot paling dekat deadline dulu (delta kecil), shift besar dulu.
-        Hard constraint HANYA: rest_days=0 & hari=hari-H filling → shift < shift_filling.
-        """
-        deadline_dt    = fill_date - timedelta(days=max(rest_days, 0))
-        fill_d_str     = fill_date.strftime("%Y-%m-%d")
+        deadline_dt = fill_date - timedelta(days=max(rest_days, 0))
+        fill_d_str  = fill_date.strftime("%Y-%m-%d")
 
         all_slots = []
         for delta in range(window_days):
-            d      = deadline_dt - timedelta(days=delta)
-            d_str  = d.strftime("%Y-%m-%d")
+            d     = deadline_dt - timedelta(days=delta)
+            d_str = d.strftime("%Y-%m-%d")
 
             for shift in [3, 2, 1]:
                 # Hard constraint: hari H filling & rest=0 → shift harus < shift_filling
                 if rest_days == 0 and d_str == fill_d_str:
                     if shift >= fill_shift:
                         continue
-
                 all_slots.append((d_str, shift, delta, shift))
 
         # Urutkan: delta kecil dulu (dekat deadline), shift besar dulu
@@ -160,11 +153,11 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
                 if rem <= 0:
                     continue
 
-                cleaning_needed  = needs_cleaning(mixer, grup_clean)
-                kg_this_slot     = min(remaining_kg, rem)
+                cleaning_needed = needs_cleaning(mixer, grup_clean)
+                kg_this_slot    = min(remaining_kg, rem)
 
                 use_slot(cdate, shift, mixer, kg_this_slot)
-                remaining_kg    -= kg_this_slot
+                remaining_kg     -= kg_this_slot
                 last_grup[mixer]  = grup_clean
 
                 assigned.append({
