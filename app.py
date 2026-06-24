@@ -2,7 +2,6 @@
 import streamlit as st
 import pandas as pd
 import io
-from datetime import timedelta
 
 from scheduler import generate_mixing_schedule
 from pivot import build_pivot, pivot_to_excel
@@ -22,7 +21,6 @@ for key in ["master_mixer", "master_produk", "filling_plan", "schedule_result"]:
 with st.sidebar:
     st.header("📂 Upload Data")
 
-    # ── Master Mixer ─────────────────────────────────────────────────────────
     st.subheader("1. Master Mixer")
     f_mixer = st.file_uploader("Upload Master Mixer (.xlsx)", type=["xlsx"], key="up_mixer")
     if f_mixer:
@@ -33,7 +31,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Gagal baca file: {e}")
 
-    # ── Master Produk ─────────────────────────────────────────────────────────
     st.subheader("2. Master Produk")
     f_produk = st.file_uploader("Upload Master Produk (.xlsx)", type=["xlsx"], key="up_produk")
     if f_produk:
@@ -44,7 +41,6 @@ with st.sidebar:
         except Exception as e:
             st.error(f"Gagal baca file: {e}")
 
-    # ── Filling Plan ──────────────────────────────────────────────────────────
     st.subheader("3. Filling Plan")
     f_filling = st.file_uploader("Upload Filling Plan (.xlsx)", type=["xlsx"], key="up_filling")
     if f_filling:
@@ -57,7 +53,6 @@ with st.sidebar:
 
     st.divider()
 
-    # ── Tombol Generate ───────────────────────────────────────────────────────
     ready = all([
         st.session_state.master_mixer is not None,
         st.session_state.master_produk is not None,
@@ -65,9 +60,7 @@ with st.sidebar:
     ])
 
     if st.button("⚡ Generate Jadwal Mixing", disabled=not ready, use_container_width=True):
-        # Reset hasil sebelumnya
         st.session_state.schedule_result = None
-
         with st.spinner("Menjadwalkan mixing..."):
             try:
                 result = generate_mixing_schedule(
@@ -128,7 +121,6 @@ if schedule_df.empty:
 else:
     st.dataframe(schedule_df, use_container_width=True, height=400)
 
-    # Download CSV
     csv_buf = io.StringIO()
     schedule_df.to_csv(csv_buf, index=False)
     st.download_button(
@@ -145,11 +137,58 @@ st.subheader("📅 Pivot Jadwal Mixing")
 
 if schedule_df.empty:
     st.info("Tidak ada data untuk ditampilkan sebagai pivot.")
-else:
-    # Hitung date_range dari hasil schedule
-    try:
-        all_dates  = pd.to_datetime(schedule_df["Tanggal_Mixing"])
-        date_min   = all_dates.min()
-        date_max   = all_dates.max()
+    st.stop()
 
-        # Extend 
+# Hitung date_range dari hasil schedule
+try:
+    all_dates  = pd.to_datetime(schedule_df["Tanggal_Mixing"])
+    fill_dates = pd.to_datetime(schedule_df["Tanggal_Filling"])
+    date_min   = all_dates.min()
+    date_max   = max(all_dates.max(), fill_dates.max())
+
+    date_range = (
+        pd.date_range(start=date_min, end=date_max)
+        .strftime("%Y-%m-%d")
+        .tolist()
+    )
+except Exception as e:
+    st.error(f"Gagal menghitung date_range: {e}")
+    date_range = []
+
+if not date_range:
+    st.stop()
+
+# Build pivot
+try:
+    pivot_df, meta = build_pivot(
+        schedule_df,
+        st.session_state.master_mixer,
+        st.session_state.master_produk,
+        date_range,
+    )
+except Exception as e:
+    st.error(f"Gagal membuat pivot: {e}")
+    st.exception(e)
+    st.stop()
+
+if pivot_df.empty:
+    st.warning("Pivot kosong. Periksa data schedule.")
+    st.stop()
+
+st.dataframe(pivot_df, use_container_width=True, height=500)
+
+# Download Excel
+try:
+    excel_bytes = pivot_to_excel(pivot_df, meta, st.session_state.master_mixer)
+    st.download_button(
+        label="⬇️ Download Pivot (Excel)",
+        data=excel_bytes,
+        file_name="pivot_jadwal_mixing.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+except Exception as e:
+    st.error(f"Gagal export Excel: {e}")
+
+# ─── Footer ───────────────────────────────────────────────────────────────────
+st.divider()
+st.caption("Mixing Scheduler — dibuat dengan ❤️ menggunakan Streamlit")
