@@ -23,7 +23,6 @@ def kg_needed(target_cs, kg_per_cs):
 
 
 def round_up_to_batch(kg, kapasitas_per_batch):
-    """Bulatkan kg ke atas ke kelipatan kapasitas_per_batch."""
     if kapasitas_per_batch <= 0:
         return kg
     n_batch = math.ceil(kg / kapasitas_per_batch)
@@ -129,20 +128,17 @@ PRODUK_COL_MAP = {
 def unpivot_filling_plan(df):
     """
     Konversi Filling Plan format kalender (wide) ke format panjang (long).
-    Jika sudah format panjang (ada kolom Tanggal_Filling & Target_CS),
-    dikembalikan langsung tanpa perubahan.
+    Jika sudah format panjang, dikembalikan langsung.
     """
     df = df.copy()
     df.columns = df.columns.astype(str).str.strip()
 
-    # Cek apakah sudah format panjang
     norm_cols   = [c.lower().replace(" ", "_") for c in df.columns]
     has_tanggal = any("tanggal" in c or "filling_date" in c for c in norm_cols)
     has_target  = any("target" in c or "qty" in c or "quantity" in c for c in norm_cols)
     if has_tanggal and has_target:
         return df
 
-    # Deteksi kolom tetap
     fixed_cols = []
     for c in df.columns:
         cl = c.lower().replace(" ", "_")
@@ -153,7 +149,6 @@ def unpivot_filling_plan(df):
     if not value_cols:
         return df
 
-    # Melt ke format panjang
     melted = df.melt(
         id_vars=fixed_cols,
         value_vars=value_cols,
@@ -169,7 +164,6 @@ def unpivot_filling_plan(df):
             "Kode_Produk", "Target_CS", "Tanggal_Filling", "Shift_Filling", "Urgent"
         ])
 
-    # Parse header kolom → Tanggal_Filling + Shift_Filling
     def parse_col(header):
         header = str(header).strip()
         m = re.search(r"(\d{1,2})[/\-](\d{1,2})[/\-](\d{2,4})", header)
@@ -203,7 +197,6 @@ def unpivot_filling_plan(df):
     melted = melted[melted["Tanggal_Filling"].notna()].copy()
     melted = melted.drop(columns=["_col_header"])
 
-    # Rename kolom tetap
     rename = {}
     for c in melted.columns:
         cl = c.lower().replace(" ", "_")
@@ -213,10 +206,8 @@ def unpivot_filling_plan(df):
             rename[c] = "Urgent"
     melted = melted.rename(columns=rename)
 
-    if "Urgent" not in melted.columns:
-        melted["Urgent"] = "Normal"
-    if "Shift_Filling" not in melted.columns:
-        melted["Shift_Filling"] = 1
+    if "Urgent"        not in melted.columns: melted["Urgent"]        = "Normal"
+    if "Shift_Filling" not in melted.columns: melted["Shift_Filling"] = 1
 
     melted["Shift_Filling"] = (
         pd.to_numeric(melted["Shift_Filling"], errors="coerce")
@@ -237,7 +228,7 @@ def get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
         d     = deadline_dt - timedelta(days=delta)
         d_str = d.strftime("%Y-%m-%d")
 
-        # Minggu (weekday=6) diberi penalti → dipakai terakhir
+        # Minggu (weekday=6) → penalti, dipakai terakhir
         day_penalty = 100 if d.weekday() == 6 else 0
 
         for shift in [3, 2, 1]:
@@ -245,7 +236,7 @@ def get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
                 continue
             all_slots.append((d_str, shift, delta, shift, day_penalty))
 
-    # Utamakan non-Minggu, lalu terdekat deadline, lalu shift terbesar
+    # Utamakan non-Minggu → terdekat deadline → shift terbesar
     all_slots.sort(key=lambda x: (x[4], x[2], -x[3]))
     return [(d_str, shift) for d_str, shift, _, _, _ in all_slots]
 
@@ -258,7 +249,7 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
     unscheduled   = []
     schedule_rows = []
 
-    # Normalisasi master mixer
+    # ── Normalisasi master mixer ──
     mixer_df = apply_col_map(master_mixer_df, MIXER_COL_MAP)
     check_required_cols(mixer_df, ["Mixer", "Kapasitas_kg", "Batch_per_Shift"], "Master Mixer")
 
@@ -271,7 +262,7 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
 
     valid_mixer_set = set(mixer_df["Mixer"].tolist())
 
-    # Normalisasi master produk
+    # ── Normalisasi master produk ──
     produk_df = apply_col_map(master_produk_df, PRODUK_COL_MAP)
     check_required_cols(produk_df, ["Kode_Produk", "Kg_per_CS"], "Master Produk")
 
@@ -283,13 +274,13 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
     if "Grup_Cleaning"    not in produk_df.columns: produk_df["Grup_Cleaning"]    = "DEFAULT"
     if "Mixer_Kompatibel" not in produk_df.columns: produk_df["Mixer_Kompatibel"] = ",".join(valid_mixer_set)
 
-    produk_df["Resting_Days"]    = pd.to_numeric(produk_df["Resting_Days"], errors="coerce").fillna(0)
-    produk_df["Grup_Cleaning"]   = produk_df["Grup_Cleaning"].astype(str).str.strip()
-    produk_df["Mixer_Kompatibel"]= produk_df["Mixer_Kompatibel"].astype(str).str.strip()
+    produk_df["Resting_Days"]     = pd.to_numeric(produk_df["Resting_Days"], errors="coerce").fillna(0)
+    produk_df["Grup_Cleaning"]    = produk_df["Grup_Cleaning"].astype(str).str.strip()
+    produk_df["Mixer_Kompatibel"] = produk_df["Mixer_Kompatibel"].astype(str).str.strip()
 
     kode_to_row = {row["Kode_Produk"]: row for _, row in produk_df.iterrows()}
 
-    # Normalisasi filling plan
+    # ── Normalisasi filling plan ──
     fp = apply_col_map(filling_plan_df, FILLING_COL_MAP)
     check_required_cols(fp, ["Kode_Produk", "Target_CS", "Tanggal_Filling"], "Filling Plan")
 
@@ -301,7 +292,7 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
     fp["Shift_Filling"] = pd.to_numeric(fp["Shift_Filling"], errors="coerce").fillna(1).astype(int)
     fp["Urgent"]        = fp["Urgent"].astype(str).str.strip()
 
-    # Helper: kapasitas mixer
+    # ── Helper kapasitas mixer ──
     def mixer_kapasitas_batch(mixer):
         row = mixer_df[mixer_df["Mixer"] == mixer]
         if row.empty:
@@ -315,9 +306,10 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         r = row.iloc[0]
         return float(r["Kapasitas_kg"]) * float(r["Batch_per_Shift"])
 
-    # State kapasitas slot & cleaning
-    slot_used = {}
-    last_grup = {}
+    # ── State ──
+    slot_used    = {}   # (date_str, shift, mixer) → kg terpakai
+    last_grup    = {}   # mixer → grup_cleaning terakhir
+    mixer_locked = {}   # (date_str, shift, mixer) → kode_produk yang mengunci slot
 
     def slot_remaining(date_str, shift, mixer):
         return max(0.0, mixer_max_kg(mixer) - slot_used.get((date_str, shift, mixer), 0.0))
@@ -330,11 +322,13 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         prev = last_grup.get(mixer)
         return False if prev is None else prev != grup_produk
 
-    # Urutkan: Urgent dulu
+    # ── Urutkan: Urgent dulu ──
     fp["_urgent_sort"] = fp["Urgent"].apply(lambda x: 0 if x == "Urgent" else 1)
-    fp = fp.sort_values(["_urgent_sort", "Tanggal_Filling", "Shift_Filling"]).reset_index(drop=True)
+    fp = fp.sort_values(
+        ["_urgent_sort", "Tanggal_Filling", "Shift_Filling"]
+    ).reset_index(drop=True)
 
-    # Proses setiap item filling
+    # ── Proses setiap item filling ──
     for _, job in fp.iterrows():
         kode       = job["Kode_Produk"]
         target_cs  = job["Target_CS"]
@@ -375,34 +369,35 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
         for (cdate, shift) in get_candidate_slots(fill_date, fill_shift, rest_days, window_days=6):
             if remaining_kg <= 0:
                 break
+
             for mixer in compat_mixers:
                 if remaining_kg <= 0:
                     break
 
-                rem       = slot_remaining(cdate, shift, mixer)
+                slot_key  = (cdate, shift, mixer)
                 kap_batch = mixer_kapasitas_batch(mixer)
+                rem       = slot_remaining(cdate, shift, mixer)
 
                 if rem <= 0 or kap_batch <= 0:
                     continue
 
-                # Bulatkan kebutuhan ke atas ke kelipatan batch
-                kg_rounded   = round_up_to_batch(remaining_kg, kap_batch)
-
-                # Batasi dengan kapasitas slot yang tersisa
-                kg_this_slot = min(kg_rounded, rem)
-
-                # Jika slot tidak cukup bahkan untuk 1 batch → skip mixer ini
-                if kg_this_slot < kap_batch:
+                # ── Prioritas berkelanjutan: slot dikunci per produk ──
+                # Jika slot sudah dipakai produk LAIN → skip
+                if slot_key in mixer_locked and mixer_locked[slot_key] != kode:
                     continue
 
-                # Pastikan kg_this_slot adalah kelipatan batch
-                kg_this_slot = round_up_to_batch(kg_this_slot, kap_batch)
-                kg_this_slot = min(kg_this_slot, rem)  # clamp ulang setelah round
+                # Hitung berapa batch yang muat di sisa slot
+                n_batch_muat = math.floor(rem / kap_batch)
+                if n_batch_muat <= 0:
+                    continue
 
-                cleaning_needed  = needs_cleaning(mixer, grup_clean)
+                kg_this_slot = n_batch_muat * kap_batch
+
+                cleaning_needed        = needs_cleaning(mixer, grup_clean)
                 use_slot(cdate, shift, mixer, kg_this_slot)
-                remaining_kg    -= min(remaining_kg, kg_this_slot)
-                last_grup[mixer] = grup_clean
+                mixer_locked[slot_key] = kode   # kunci slot untuk produk ini
+                remaining_kg          -= min(remaining_kg, kg_this_slot)
+                last_grup[mixer]       = grup_clean
 
                 assigned.append({
                     "Tanggal_Mixing":  cdate,
@@ -422,8 +417,9 @@ def generate_mixing_schedule(master_mixer_df, master_produk_df, filling_plan_df)
 
         schedule_rows.extend(assigned)
 
-        # Toleransi sisa ≤ 1 batch (wajar karena pembulatan)
-        if remaining_kg > mixer_kapasitas_batch(compat_mixers[0]):
+        # Toleransi: sisa boleh sampai 1 batch (efek pembulatan wajar)
+        kap_first = mixer_kapasitas_batch(compat_mixers[0])
+        if remaining_kg > kap_first:
             if is_urgent:
                 unscheduled.append(
                     f"{kode} - {nama} [URGENT]: Kapasitas mixer tidak cukup. "
