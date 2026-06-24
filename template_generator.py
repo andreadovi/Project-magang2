@@ -7,30 +7,26 @@ from openpyxl.utils import get_column_letter
 
 DAYS_ID = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
 
-FILL_HEADER      = PatternFill("solid", fgColor="1F4E79")
-FILL_HEADER_MID  = PatternFill("solid", fgColor="2E75B6")
-FILL_HEADER_LIGHT= PatternFill("solid", fgColor="BDD7EE")
-FILL_EXAMPLE     = PatternFill("solid", fgColor="EBF3FB")
-FILL_NOTE        = PatternFill("solid", fgColor="FFF2CC")
-FILL_URGENT      = PatternFill("solid", fgColor="FFE0E0")
-FILL_LOCKED      = PatternFill("solid", fgColor="F2F2F2")
+FILL_HEADER       = PatternFill("solid", fgColor="1F4E79")
+FILL_HEADER_LIGHT = PatternFill("solid", fgColor="BDD7EE")
+FILL_EXAMPLE      = PatternFill("solid", fgColor="EBF3FB")
+FILL_NOTE         = PatternFill("solid", fgColor="FFF2CC")
+FILL_URGENT       = PatternFill("solid", fgColor="FFE0E0")
+FILL_LOCKED       = PatternFill("solid", fgColor="F2F2F2")
+FILL_CS_EXAMPLE   = PatternFill("solid", fgColor="D9EAD3")
 
-FONT_WHITE       = Font(bold=True, color="FFFFFF", size=11)
-FONT_WHITE_SM    = Font(bold=True, color="FFFFFF", size=10)
-FONT_BOLD        = Font(bold=True, size=10)
-FONT_ITALIC      = Font(italic=True, color="7F7F7F", size=9)
-FONT_NORMAL      = Font(size=10)
+FONT_WHITE  = Font(bold=True, color="FFFFFF", size=11)
+FONT_BOLD   = Font(bold=True, size=10)
+FONT_ITALIC = Font(italic=True, color="7F7F7F", size=9)
+FONT_NORMAL = Font(size=10)
+FONT_CS     = Font(bold=True, size=10)
 
-ALIGN_CENTER     = Alignment(horizontal="center", vertical="center", wrap_text=True)
-ALIGN_LEFT       = Alignment(horizontal="left",   vertical="center", wrap_text=True)
+ALIGN_CENTER = Alignment(horizontal="center", vertical="center", wrap_text=True)
+ALIGN_LEFT   = Alignment(horizontal="left",   vertical="center", wrap_text=True)
 
 THIN_BORDER = Border(
     left=Side(style="thin"),  right=Side(style="thin"),
     top=Side(style="thin"),   bottom=Side(style="thin"),
-)
-MEDIUM_BORDER = Border(
-    left=Side(style="medium"), right=Side(style="medium"),
-    top=Side(style="medium"),  bottom=Side(style="medium"),
 )
 
 
@@ -53,21 +49,22 @@ def _add_petunjuk_sheet(wb):
     ws.merge_cells("A1:B1")
 
     rows = [
-        ("FILE", "KETERANGAN"),
-        ("Master Mixer",     "Daftar semua mixer: nama, kapasitas (kg/batch), batch per shift, grup cleaning."),
-        ("Master Produk",    "Daftar produk: kode, nama, kg/CS, resting days, grup cleaning, mixer kompatibel."),
-        ("Filling Plan",     "Rencana filling: produk (baris) vs tanggal+shift (kolom). Isi Target CS di sel perpotongan."),
+        ("FILE",                "KETERANGAN"),
+        ("Master Mixer",        "Daftar semua mixer: nama, kapasitas (kg/batch), batch per shift, grup cleaning."),
+        ("Master Produk",       "Daftar produk: kode, nama, kg/CS, resting days, grup cleaning, mixer kompatibel."),
+        ("Filling Plan",        "Format kalender: baris = produk, kolom = tanggal+shift. Isi angka CS di sel yang sesuai."),
         ("", ""),
-        ("KOLOM", "KETERANGAN"),
-        ("Kode_Produk",      "Kode unik produk — harus cocok dengan Master Produk."),
-        ("Nama_Produk",      "Nama produk (otomatis, tidak perlu diisi ulang — hanya referensi)."),
-        ("Urgent",           "Isi 'Urgent' untuk prioritas tinggi, kosong / 'Normal' untuk biasa."),
-        ("Senin S1 / S2 / S3", "Isi jumlah Target CS di kolom tanggal+shift yang sesuai. Kosongkan jika tidak ada filling."),
+        ("KOLOM",               "KETERANGAN"),
+        ("Kode_Produk",         "Kode unik produk — harus cocok dengan Master Produk."),
+        ("Nama_Produk",         "Nama produk (opsional, hanya referensi visual)."),
+        ("Urgent",              "Isi 'Urgent' untuk prioritas tinggi, kosong atau 'Normal' untuk biasa."),
+        ("Kolom tanggal+shift", "Header otomatis (Senin S1, dst). Isi angka CS, kosongkan jika tidak ada filling."),
         ("", ""),
-        ("CATATAN", ""),
-        ("Format tanggal",   "Header kolom sudah otomatis. Cukup isi angka CS di sel yang sesuai."),
-        ("Baris contoh",     "Hapus baris contoh sebelum upload, atau biarkan (baris kosong diabaikan)."),
-        ("Kolom Nama_Produk","Tidak perlu diisi, hanya referensi visual."),
+        ("CATATAN",             ""),
+        ("Format tanggal",      "Sudah otomatis di header. Tidak perlu diubah."),
+        ("Baris contoh",        "Hapus sebelum upload. Baris dengan CS kosong/0 diabaikan otomatis."),
+        ("Mixer_Kompatibel",    "Pisahkan dengan koma tanpa spasi. Contoh: M1,M2,M3"),
+        ("Resting_Days = 0",    "Produk bisa langsung di-filling di hari yang sama setelah mixing."),
     ]
 
     for ri, (a, b) in enumerate(rows, 3):
@@ -171,32 +168,40 @@ def generate_template_master_produk():
 
 def generate_template_filling_plan(n_days=14, start_date=None):
     """
-    Template Filling Plan dengan layout kalender.
+    Template Filling Plan format KALENDER.
     Baris  = produk (Kode_Produk | Nama_Produk | Urgent)
-    Kolom  = setiap (tanggal, shift) → user isi Target CS
-
-    Setelah diupload, app.py perlu melt/unpivot dulu sebelum masuk scheduler.
+    Kolom  = setiap tanggal × shift  →  isi angka Target CS
     """
     if start_date is None:
-        # Mulai dari Senin minggu ini
-        today = datetime.today()
-        start_date = today - timedelta(days=today.weekday())
+        today      = datetime.today()
+        start_date = today - timedelta(days=today.weekday())  # mulai Senin minggu ini
 
     wb = Workbook()
     ws = wb.active
     ws.title = "Filling Plan"
 
-    # ── Bangun daftar (date, shift) ───────────────────────────────────────────
+    FIXED = 3  # Kode_Produk | Nama_Produk | Urgent
+
+    # Bangun list (datetime, shift)
     date_shift_cols = []
     for d in range(n_days):
         dt = start_date + timedelta(days=d)
         for s in [1, 2, 3]:
             date_shift_cols.append((dt, s))
 
-    FIXED = 3   # kolom tetap: Kode_Produk, Nama_Produk, Urgent
+    # ROW 1-2: merge kolom tetap (row 1 & 2), header tanggal row 1, shift row 2
+    for ci in range(1, FIXED + 1):
+        ws.merge_cells(start_row=1, start_column=ci, end_row=2, end_column=ci)
 
-    # ── Row 1: header tanggal (merge 3 kolom per tanggal) ────────────────────
-    col_cursor = FIXED + 1
+    fixed_headers = ["Kode_Produk", "Nama_Produk", "Urgent"]
+    for ci, h in enumerate(fixed_headers, 1):
+        c = ws.cell(row=1, column=ci, value=h)
+        c.fill      = FILL_HEADER
+        c.font      = FONT_WHITE
+        c.alignment = ALIGN_CENTER
+        c.border    = THIN_BORDER
+
+    col_cursor   = FIXED + 1
     current_date = None
     for (dt, s) in date_shift_cols:
         if dt != current_date:
@@ -214,77 +219,76 @@ def generate_template_filling_plan(n_days=14, start_date=None):
             )
         col_cursor += 1
 
-    # ── Row 2: header kolom tetap + shift ────────────────────────────────────
-    fixed_headers = ["Kode_Produk", "Nama_Produk", "Urgent"]
-    for ci, h in enumerate(fixed_headers, 1):
-        _cell(ws, 2, ci, h, fill=FILL_HEADER, font=FONT_WHITE,
-              align=ALIGN_CENTER, border=THIN_BORDER)
-        ws.merge_cells(start_row=1, start_column=ci, end_row=2, end_column=ci)
-
+    # ROW 2: header shift S1 S2 S3
     for ci, (dt, s) in enumerate(date_shift_cols, FIXED + 1):
-        _cell(ws, 2, ci, f"S{s}", fill=FILL_HEADER_LIGHT, font=FONT_BOLD,
-              align=ALIGN_CENTER, border=THIN_BORDER)
+        c = ws.cell(row=2, column=ci, value=f"S{s}")
+        c.fill      = FILL_HEADER_LIGHT
+        c.font      = FONT_BOLD
+        c.alignment = ALIGN_CENTER
+        c.border    = THIN_BORDER
 
-    # ── Row 3: baris catatan ─────────────────────────────────────────────────
+    # ROW 3: baris catatan kuning
     note_row = 3
-    _cell(ws, note_row, 1, "← Kode harus ada di Master Produk",
-          fill=FILL_NOTE, font=FONT_ITALIC, align=ALIGN_LEFT, border=THIN_BORDER)
-    _cell(ws, note_row, 2, "← Nama (opsional, hanya referensi)",
-          fill=FILL_NOTE, font=FONT_ITALIC, align=ALIGN_LEFT, border=THIN_BORDER)
-    _cell(ws, note_row, 3, "'Urgent' / kosong",
-          fill=FILL_NOTE, font=FONT_ITALIC, align=ALIGN_LEFT, border=THIN_BORDER)
+    notes_fixed = [
+        "← Kode harus ada di Master Produk",
+        "← Nama produk (opsional)",
+        "'Urgent' atau kosong/Normal",
+    ]
+    for ci, val in enumerate(notes_fixed, 1):
+        _cell(ws, note_row, ci, val,
+              fill=FILL_NOTE, font=FONT_ITALIC, align=ALIGN_LEFT, border=THIN_BORDER)
     for ci in range(FIXED + 1, FIXED + len(date_shift_cols) + 1):
-        _cell(ws, note_row, ci, "← isi CS",
+        _cell(ws, note_row, ci, "isi CS",
               fill=FILL_NOTE, font=FONT_ITALIC, align=ALIGN_CENTER, border=THIN_BORDER)
 
-    # ── Row 4-8: contoh data ─────────────────────────────────────────────────
+    # ROW 4+: contoh data
     example_products = [
         ("PRD001", "Produk A 1L",    "Normal"),
         ("PRD002", "Produk B 500ml", "Urgent"),
         ("PRD003", "Produk C 2L",    "Normal"),
         ("PRD004", "Produk D 250ml", "Normal"),
-        ("PRD001", "Produk A 1L",    "Urgent"),
     ]
-    example_cs = [100, 200, 150, 80, 120]
+    example_cs_vals = [100, 200, 150, 80]
 
-    for ri, ((kode, nama, urgent), cs) in enumerate(
-        zip(example_products, example_cs), note_row + 1
+    for idx, ((kode, nama, urgent), cs_val) in enumerate(
+        zip(example_products, example_cs_vals)
     ):
-        fill = FILL_URGENT if urgent == "Urgent" else FILL_EXAMPLE
-        _cell(ws, ri, 1, kode,   fill=fill, font=FONT_NORMAL, align=ALIGN_LEFT,  border=THIN_BORDER)
-        _cell(ws, ri, 2, nama,   fill=fill, font=FONT_NORMAL, align=ALIGN_LEFT,  border=THIN_BORDER)
-        _cell(ws, ri, 3, urgent, fill=fill, font=FONT_NORMAL, align=ALIGN_CENTER, border=THIN_BORDER)
-        # Isi satu sel CS di shift/hari pertama sebagai contoh
-        col_example = FIXED + 1 + ri - (note_row + 1)
-        col_example = min(col_example, FIXED + len(date_shift_cols))
-        _cell(ws, ri, col_example, cs,
-              fill=PatternFill("solid", fgColor="D9EAD3"),
-              font=Font(bold=True, size=10),
-              align=ALIGN_CENTER, border=THIN_BORDER)
-        # Sisa sel kosong
-        for ci in range(FIXED + 1, FIXED + len(date_shift_cols) + 1):
-            if ci != col_example:
-                _cell(ws, ri, ci, "", fill=FILL_LOCKED,
-                      font=FONT_NORMAL, align=ALIGN_CENTER, border=THIN_BORDER)
+        ri       = note_row + 1 + idx
+        row_fill = FILL_URGENT if urgent == "Urgent" else FILL_EXAMPLE
 
-    # ── Row kosong untuk input user (30 baris) ────────────────────────────────
+        _cell(ws, ri, 1, kode,   fill=row_fill, font=FONT_NORMAL, align=ALIGN_LEFT,   border=THIN_BORDER)
+        _cell(ws, ri, 2, nama,   fill=row_fill, font=FONT_NORMAL, align=ALIGN_LEFT,   border=THIN_BORDER)
+        _cell(ws, ri, 3, urgent, fill=row_fill, font=FONT_NORMAL, align=ALIGN_CENTER, border=THIN_BORDER)
+
+        col_example = FIXED + 1 + (idx * 3)
+        col_example = min(col_example, FIXED + len(date_shift_cols))
+
+        for ci in range(FIXED + 1, FIXED + len(date_shift_cols) + 1):
+            if ci == col_example:
+                _cell(ws, ri, ci, cs_val,
+                      fill=FILL_CS_EXAMPLE, font=FONT_CS,
+                      align=ALIGN_CENTER, border=THIN_BORDER)
+            else:
+                _cell(ws, ri, ci, "",
+                      fill=FILL_LOCKED, font=FONT_NORMAL,
+                      align=ALIGN_CENTER, border=THIN_BORDER)
+
+    # ROW kosong untuk input user (30 baris)
     data_start = note_row + len(example_products) + 1
     for ri in range(data_start, data_start + 30):
         for ci in range(1, FIXED + 1):
-            _cell(ws, ri, ci, "", fill=None, font=FONT_NORMAL,
-                  align=ALIGN_LEFT, border=THIN_BORDER)
+            _cell(ws, ri, ci, "", font=FONT_NORMAL, align=ALIGN_LEFT, border=THIN_BORDER)
         for ci in range(FIXED + 1, FIXED + len(date_shift_cols) + 1):
-            _cell(ws, ri, ci, "", fill=None, font=FONT_NORMAL,
-                  align=ALIGN_CENTER, border=THIN_BORDER)
+            _cell(ws, ri, ci, "", font=FONT_NORMAL, align=ALIGN_CENTER, border=THIN_BORDER)
 
-    # ── Column widths ─────────────────────────────────────────────────────────
-    ws.column_dimensions["A"].width = 14
+    # Column widths & row heights
+    ws.column_dimensions["A"].width = 16
     ws.column_dimensions["B"].width = 22
-    ws.column_dimensions["C"].width = 10
+    ws.column_dimensions["C"].width = 12
     for ci in range(FIXED + 1, FIXED + len(date_shift_cols) + 1):
         ws.column_dimensions[get_column_letter(ci)].width = 7
 
-    ws.row_dimensions[1].height = 30
+    ws.row_dimensions[1].height = 35
     ws.row_dimensions[2].height = 18
     ws.row_dimensions[note_row].height = 16
     ws.freeze_panes = f"{get_column_letter(FIXED + 1)}3"
